@@ -1,9 +1,9 @@
 import os
+from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 def get_news_sentiment(ticker: str):
     """
