@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from api.alphavantage import get_news_sentiment
+from api.nifty50 import NIFTY_50
 
 st.set_page_config(page_title="Stock Market Analyser", page_icon="📈", layout="wide")
 
@@ -10,7 +11,15 @@ st.markdown("Fetch real-time stock news and sentiment impact using AlphaVantage.
 # Sidebar for inputs
 with st.sidebar:
     st.header("Search Parameters")
-    ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, MSFT)", value="AAPL")
+    mode = st.radio("Stock Mode", ["Custom Ticker", "Nifty 50"], horizontal=True)
+
+    if mode == "Nifty 50":
+        company = st.selectbox("Select Nifty 50 Stock", list(NIFTY_50.keys()))
+        ticker = NIFTY_50[company]
+        st.caption(f"AlphaVantage ticker: `{ticker}`")
+    else:
+        ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, TSLA, MSFT)", value="AAPL")
+
     fetch_button = st.button("Fetch News Sentiment")
 
 if fetch_button:

@@ -3,7 +3,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+# Load .env for local dev; in Codespaces the key is injected as an env var
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 def get_news_sentiment(ticker: str):
     """
