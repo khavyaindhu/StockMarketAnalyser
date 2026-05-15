@@ -6,6 +6,32 @@ from dotenv import load_dotenv
 # Load .env for local dev; in Codespaces the key is injected as an env var
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
+
+def get_quote(ticker: str) -> dict:
+    """Returns current price and % change for a BSE ticker."""
+    api_key = os.getenv("ALPHAVANTAGE_API_KEY")
+    if not api_key:
+        return {"error": "AlphaVantage API key not found."}
+
+    try:
+        r = requests.get(
+            "https://www.alphavantage.co/query",
+            params={"function": "GLOBAL_QUOTE", "symbol": ticker, "apikey": api_key},
+            timeout=10,
+        )
+        r.raise_for_status()
+        quote = r.json().get("Global Quote", {})
+        if not quote:
+            return {"error": "No data (rate-limited or invalid ticker)."}
+        return {
+            "price": quote.get("05. price", "N/A"),
+            "change": quote.get("09. change", "N/A"),
+            "change_percent": quote.get("10. change percent", "N/A"),
+        }
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
+
+
 def get_news_sentiment(ticker: str):
     """
     Fetches the latest news and sentiment for a given ticker from AlphaVantage.
