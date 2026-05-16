@@ -1,7 +1,35 @@
 import os
-import ollama
+import json
+import requests
 
-MODEL = os.getenv("GLM5_MODEL", "glm-5:cloud")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+# Free models on OpenRouter — swap this string to try different models:
+#   "google/gemini-2.0-flash-exp:free"
+#   "deepseek/deepseek-r1:free"
+#   "mistralai/mistral-7b-instruct:free"
+#   "meta-llama/llama-3.3-70b-instruct:free"  ← default (strong, free)
+MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def _headers() -> dict:
+    return {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/StockMarketAnalyser",
+        "X-Title": "Stock Market Analyser",
+    }
+
+
+def _chat(messages: list) -> str:
+    payload = {"model": MODEL, "messages": messages, "temperature": 0.7}
+    try:
+        r = requests.post(OPENROUTER_URL, json=payload, headers=_headers(), timeout=60)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+    except requests.exceptions.RequestException as e:
+        return f"Error calling OpenRouter API: {e}"
 
 
 def _build_portfolio_prompt(stock_name: str, ticker: str, news: list, sentiment_data: list) -> str:
@@ -67,54 +95,32 @@ Provide:
 Be specific, concise, and grounded in the news provided."""
 
 
-def _build_chat_prompt(user_question: str, context: str) -> str:
-    return f"""You are a financial assistant for an Indian stock market investor.
-
-Portfolio context:
-{context}
-
-User question: {user_question}
-
-Answer concisely and specifically. Focus on Indian market dynamics."""
-
-
 def analyze_stock(stock_name: str, ticker: str, news: list, sentiment_data: list) -> str:
-    """Returns AI analysis for a single stock using news + sentiment data."""
     prompt = _build_portfolio_prompt(stock_name, ticker, news, sentiment_data)
-    try:
-        response = ollama.chat(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response["message"]["content"]
-    except Exception as e:
-        return f"Error connecting to Ollama: {e}\n\nMake sure Ollama is running (`ollama serve`) and you are signed in (`ollama signin`) for cloud models."
+    return _chat([{"role": "user", "content": prompt}])
 
 
 def analyze_theme(theme_name: str, impact_note: str, news: list, affected_stocks: list) -> str:
-    """Returns AI analysis for a macro theme."""
     prompt = _build_theme_prompt(theme_name, impact_note, news, affected_stocks)
-    try:
-        response = ollama.chat(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response["message"]["content"]
-    except Exception as e:
-        return f"Error connecting to Ollama: {e}"
+    return _chat([{"role": "user", "content": prompt}])
 
 
 def stream_chat(messages: list):
-    """Yields content chunks for streaming chat responses."""
+    payload = {"model": MODEL, "messages": messages, "temperature": 0.7, "stream": True}
     try:
-        stream = ollama.chat(
-            model=MODEL,
-            messages=messages,
-            stream=True,
-        )
-        for chunk in stream:
-            delta = chunk.get("message", {}).get("content", "")
-            if delta:
-                yield delta
-    except Exception as e:
-        yield f"Error connecting to Ollama: {e}\n\nMake sure Ollama is running (`ollama serve`) and you are signed in (`ollama signin`)."
+        with requests.post(OPENROUTER_URL, json=payload, headers=_headers(), stream=True, timeout=60) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                line = line.decode("utf-8")
+                if line.startswith("data: "):
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    chunk = json.loads(data)
+                    delta = chunk["choices"][0]["delta"].get("content", "")
+                    if delta:
+                        yield delta
+    except requests.exceptions.RequestException as e:
+        yield f"Error calling OpenRouter API: {e}"

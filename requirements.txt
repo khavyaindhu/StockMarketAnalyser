@@ -2,4 +2,3 @@ streamlit
 requests
 python-dotenv
 pandas
-ollama

@@ -214,7 +214,7 @@ with tab3:
 # ── Tab 4: AI Analysis ─────────────────────────────────────────────────────────
 with tab4:
     st.subheader("🤖 GLM-5 AI Analysis")
-    st.caption("Powered by GLM-5 via Ollama · Make sure `ollama serve` is running and you are signed in")
+    st.caption("Powered by Llama 3.3 70B · via OpenRouter · Free model · No local setup needed")
 
     ai_tab1, ai_tab2, ai_tab3 = st.tabs(["📊 Portfolio Stock Analysis", "🌐 Theme Analysis", "💬 Ask AI"])
 
