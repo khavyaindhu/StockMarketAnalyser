@@ -3,13 +3,14 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-# Load .env for local dev; in Codespaces the key is injected as an env var
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "1IIESJ7MS31GAH0O")
 
 
 def get_quote(ticker: str) -> dict:
     """Returns current price and % change for a BSE ticker."""
-    api_key = os.getenv("ALPHAVANTAGE_API_KEY")
+    api_key = ALPHAVANTAGE_API_KEY
     if not api_key:
         return {"error": "AlphaVantage API key not found."}
 
@@ -36,7 +37,7 @@ def get_news_sentiment(ticker: str):
     """
     Fetches the latest news and sentiment for a given ticker from AlphaVantage.
     """
-    api_key = os.getenv("ALPHAVANTAGE_API_KEY")
+    api_key = ALPHAVANTAGE_API_KEY
     if not api_key:
         raise ValueError("AlphaVantage API key not found. Please check your .env file.")
 

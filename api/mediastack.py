@@ -5,9 +5,11 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
+MEDIASTACK_API_KEY = os.getenv("MEDIASTACK_API_KEY", "7c583d89eec9c938b014ee6610907601")
+
 
 def get_india_news(keywords: list[str], limit: int = 10) -> dict:
-    api_key = os.getenv("MEDIASTACK_API_KEY")
+    api_key = MEDIASTACK_API_KEY
     if not api_key:
         raise ValueError("Mediastack API key not found. Please check your .env file.")
 
