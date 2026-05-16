@@ -4,11 +4,12 @@ from api.alphavantage import get_news_sentiment, get_quote
 from api.mediastack import get_india_news
 from api.portfolio import PORTFOLIO, THEMES
 from api.nifty50 import NIFTY_50
+from api.glm5 import analyze_stock, analyze_theme, stream_chat
 
 st.set_page_config(page_title="Stock Market Analyser", page_icon="📈", layout="wide")
 st.title("📈 Stock Market Analyser — India Focus")
 
-tab1, tab2, tab3 = st.tabs(["🗂 My Portfolio", "🌐 Theme Analysis", "🔍 Nifty 50 News"])
+tab1, tab2, tab3, tab4 = st.tabs(["🗂 My Portfolio", "🌐 Theme Analysis", "🔍 Nifty 50 News", "🤖 AI Analysis"])
 
 
 # ── Tab 1: My Portfolio ────────────────────────────────────────────────────────
@@ -208,3 +209,115 @@ with tab3:
                 )
             else:
                 st.info("No AlphaVantage sentiment data.")
+
+
+# ── Tab 4: AI Analysis ─────────────────────────────────────────────────────────
+with tab4:
+    st.subheader("🤖 GLM-5 AI Analysis")
+    st.caption("Powered by GLM-5 via Ollama · Make sure `ollama serve` is running and you are signed in")
+
+    ai_tab1, ai_tab2, ai_tab3 = st.tabs(["📊 Portfolio Stock Analysis", "🌐 Theme Analysis", "💬 Ask AI"])
+
+    # ── AI Sub-tab 1: Portfolio stock analysis ──────────────────────────────────
+    with ai_tab1:
+        st.markdown("Select a stock from your portfolio to get a GLM-5 generated analysis based on live news and sentiment.")
+
+        stock_choice = st.selectbox("Choose a portfolio stock", list(PORTFOLIO.keys()), key="ai_stock_select")
+
+        if st.button("Generate AI Analysis", type="primary", key="ai_stock_btn"):
+            info = PORTFOLIO[stock_choice]
+            ticker = info["ticker"]
+
+            with st.spinner(f"Fetching data for {stock_choice}..."):
+                news_data = get_india_news(info["keywords"], limit=6)
+                av_data = get_news_sentiment(ticker)
+
+            news_list = news_data.get("data", [])
+            sentiment_list = av_data.get("data", [])
+
+            with st.spinner("GLM-5 is analysing..."):
+                result = analyze_stock(stock_choice, ticker, news_list, sentiment_list)
+
+            st.markdown(f"### Analysis: {stock_choice} ({ticker})")
+            st.markdown(result)
+
+    # ── AI Sub-tab 2: Theme AI analysis ────────────────────────────────────────
+    with ai_tab2:
+        st.markdown("Select a macro theme to get GLM-5's analysis of how it affects your portfolio.")
+
+        theme_choice = st.selectbox("Choose a macro theme", list(THEMES.keys()), key="ai_theme_select")
+
+        if st.button("Generate Theme Analysis", type="primary", key="ai_theme_btn"):
+            theme = THEMES[theme_choice]
+
+            with st.spinner(f"Fetching news for theme: {theme_choice}..."):
+                theme_news = get_india_news(theme["keywords"], limit=8)
+
+            affected = [
+                name for name, info in PORTFOLIO.items()
+                if info["sector"] in theme["affected_sectors"]
+            ]
+
+            with st.spinner("GLM-5 is analysing the macro theme..."):
+                result = analyze_theme(
+                    theme_choice,
+                    theme["impact_note"],
+                    theme_news.get("data", []),
+                    affected,
+                )
+
+            st.markdown(f"### Macro Theme: {theme_choice}")
+            if affected:
+                st.caption(f"Affected portfolio stocks: {', '.join(affected)}")
+            st.markdown(result)
+
+    # ── AI Sub-tab 3: Free-form chat ────────────────────────────────────────────
+    with ai_tab3:
+        st.markdown("Ask GLM-5 anything about your portfolio, the Indian market, or investing strategy.")
+
+        # Build a brief portfolio context string to inject into every message
+        portfolio_context = "\n".join(
+            f"- {name} ({info['ticker']}, sector: {info['sector']})"
+            for name, info in PORTFOLIO.items()
+        )
+
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        # Display chat history
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        user_input = st.chat_input("Ask about your portfolio or the Indian market...")
+
+        if user_input:
+            st.session_state.chat_history.append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            system_msg = {
+                "role": "system",
+                "content": (
+                    "You are a financial assistant specializing in Indian stock markets. "
+                    f"The user's portfolio:\n{portfolio_context}\n"
+                    "Answer concisely and specifically. Focus on Indian market dynamics."
+                ),
+            }
+
+            messages_to_send = [system_msg] + st.session_state.chat_history
+
+            with st.chat_message("assistant"):
+                response_placeholder = st.empty()
+                full_response = ""
+                for chunk in stream_chat(messages_to_send):
+                    full_response += chunk
+                    response_placeholder.markdown(full_response + "▌")
+                response_placeholder.markdown(full_response)
+
+            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+
+        if st.session_state.chat_history:
+            if st.button("Clear Chat", key="clear_chat"):
+                st.session_state.chat_history = []
+                st.rerun()
