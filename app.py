@@ -150,7 +150,7 @@ with tab2:
                     return ""
 
             st.dataframe(
-                df.style.applymap(color_change, subset=["Change"]),
+                df.style.map(color_change, subset=["Change"]),
                 use_container_width=True,
                 hide_index=True,
             )
