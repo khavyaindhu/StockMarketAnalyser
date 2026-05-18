@@ -15,10 +15,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_API_KEY     = os.getenv("ANGELONE_API_KEY", "")
-_CLIENT_CODE = os.getenv("ANGELONE_CLIENT_CODE", "")
-_PASSWORD    = os.getenv("ANGELONE_PASSWORD", "")
-_TOTP_SECRET = os.getenv("ANGELONE_TOTP_SECRET", "")
+
+def _ascii(value: str) -> str:
+    """Strip whitespace and drop any non-ASCII characters (handles bad paste)."""
+    return "".join(c for c in (value or "").strip() if ord(c) < 128)
+
+
+_API_KEY     = _ascii(os.getenv("ANGELONE_API_KEY", ""))
+_CLIENT_CODE = _ascii(os.getenv("ANGELONE_CLIENT_CODE", ""))
+_PASSWORD    = _ascii(os.getenv("ANGELONE_PASSWORD", ""))
+_TOTP_SECRET = _ascii(os.getenv("ANGELONE_TOTP_SECRET", "")).upper().replace(" ", "")
 
 
 def _check_config() -> list[str]:
