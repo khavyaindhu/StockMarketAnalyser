@@ -37,6 +37,32 @@ def _check_config() -> list[str]:
     return missing
 
 
+def _validate_totp_secret(secret: str) -> None:
+    """Raise ValueError with a clear message if the TOTP secret is not valid base32."""
+    import base64, binascii
+    # base32 alphabet: A-Z and 2-7
+    valid = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+    bad = [c for c in secret if c not in valid]
+    if bad:
+        raise ValueError(
+            f"TOTP secret contains invalid base32 characters: {bad!r}. "
+            "It must contain only A-Z and 2-7. "
+            "Tip: in Google Authenticator tap the account → key icon → copy the secret. "
+            "Do not include spaces or special characters."
+        )
+    if len(secret) < 8:
+        raise ValueError(
+            f"TOTP secret is too short ({len(secret)} chars). "
+            "A valid base32 secret is usually 16–32 characters."
+        )
+    # Attempt actual decode to catch padding issues
+    try:
+        padded = secret + "=" * (-len(secret) % 8)
+        base64.b32decode(padded)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"TOTP secret failed base32 decode: {e}") from e
+
+
 def create_session():
     """
     Authenticate with Angel One SmartAPI and return a live SmartConnect session.
@@ -46,7 +72,7 @@ def create_session():
         Also returns a dict with the raw login response (tokens, profile, etc.).
 
     Raises:
-        ValueError  if any credentials are missing from .env
+        ValueError  if any credentials are missing from .env or TOTP secret is invalid
         Exception   if SmartAPI login fails
     """
     missing = _check_config()
@@ -59,16 +85,35 @@ def create_session():
         from SmartApi import SmartConnect
     except ImportError:
         raise ImportError(
-            "smartapi-python is not installed. Run: pip install smartapi-python pyotp websocket-client"
+            "smartapi-python is not installed. "
+            "Run: pip install smartapi-python pyotp websocket-client"
         )
+
+    # Validate TOTP secret before use so errors are readable
+    _validate_totp_secret(_TOTP_SECRET)
+
+    try:
+        totp = pyotp.TOTP(_TOTP_SECRET).now()
+    except Exception as e:
+        raise ValueError(f"Failed to generate TOTP from secret: {e}") from e
 
     api = SmartConnect(api_key=_API_KEY)
 
-    totp = pyotp.TOTP(_TOTP_SECRET).now()
-    data = api.generateSession(_CLIENT_CODE, _PASSWORD, totp)
+    try:
+        data = api.generateSession(_CLIENT_CODE, _PASSWORD, totp)
+    except Exception as e:
+        raise Exception(f"Angel One API call failed: {e}") from e
 
-    if data.get("status") is False:
-        raise Exception(f"Angel One login failed: {data.get('message', 'unknown error')}")
+    if not data:
+        raise Exception("Angel One returned an empty response. Check your API key and network.")
+
+    status = data.get("status")
+    if status is False or str(status).lower() == "false":
+        msg = data.get("message") or data.get("errorMessage") or "unknown error"
+        code = data.get("errorCode") or data.get("errorcode") or ""
+        raise Exception(
+            f"Angel One login failed [{code}]: {msg}"
+        )
 
     return api, data
 

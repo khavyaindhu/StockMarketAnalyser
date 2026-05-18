@@ -363,8 +363,8 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
             st.caption(f"Last fetched at {st.session_state.get('ao_fetch_time', '—')}")
 
     if fetch_ao:
+        import datetime
         with st.spinner("Authenticating and fetching data from Angel One…"):
-            import datetime
             st.session_state["ao_profile"]   = get_profile()
             st.session_state["ao_funds"]     = get_funds()
             st.session_state["ao_trades"]    = get_trade_book()
@@ -373,7 +373,36 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
             st.session_state["ao_positions"] = get_positions()
             st.session_state["ao_fetched"]   = True
             st.session_state["ao_fetch_time"] = datetime.datetime.now().strftime("%H:%M:%S")
-        st.success("Data fetched successfully.")
+
+        # Surface first error prominently so it's easy to diagnose
+        first_error = next(
+            (v["error"] for v in [
+                st.session_state["ao_profile"],
+                st.session_state["ao_funds"],
+            ] if not v["status"]),
+            None,
+        )
+        if first_error:
+            st.error(f"Authentication failed: {first_error}")
+            _hint = ""
+            if "base32" in first_error.lower() or "totp" in first_error.lower():
+                _hint = (
+                    "**TOTP secret issue:** Open `.env` and check `ANGELONE_TOTP_SECRET`. "
+                    "It must be A-Z and 2-7 only (no spaces, no special chars, no 0/1/8/9). "
+                    "Tip: In Angel One app → My Profile → Account Security → View TOTP secret."
+                )
+            elif "login failed" in first_error.lower() or "invalid" in first_error.lower():
+                _hint = (
+                    "**Login failed:** Double-check `ANGELONE_CLIENT_CODE` (e.g. R123456), "
+                    "`ANGELONE_PASSWORD` (your 4-digit trading PIN), and "
+                    "`ANGELONE_API_KEY` (from smartapi.angelone.in → Apps)."
+                )
+            elif "not installed" in first_error.lower():
+                _hint = "**Missing package:** Run `pip install smartapi-python pyotp websocket-client` in the terminal."
+            if _hint:
+                st.info(_hint)
+        else:
+            st.success("Data fetched successfully.")
 
     if "ao_fetched" not in st.session_state:
         st.info("Click **Fetch from Angel One** to load your live trading data.")
