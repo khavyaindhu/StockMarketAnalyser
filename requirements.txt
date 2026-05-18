@@ -2,3 +2,9 @@ streamlit
 requests
 python-dotenv
 pandas
+
+# Angel One SmartAPI
+smartapi-python
+pyotp
+websocket-client
+logzero
