@@ -7,5 +7,3 @@ port = 8501
 
 [browser]
 gatherUsageStats = false
-serverAddress = "localhost"
-serverPort = 8501
