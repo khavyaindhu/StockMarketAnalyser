@@ -452,6 +452,8 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                 ]
                 funds_df = pd.DataFrame(fund_rows, columns=["Item", "Value"])
                 st.dataframe(funds_df, use_container_width=True, hide_index=True)
+                with st.expander("Raw API response (debug)"):
+                    st.json(f)
 
     # ── AO Sub-tab 2: Trade Book ───────────────────────────────────────────────
     with ao2:

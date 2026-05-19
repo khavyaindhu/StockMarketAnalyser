@@ -1,9 +1,8 @@
 """
 Angel One SmartAPI integration.
 
-Handles authentication (API key + TOTP) and fetches live trade data.
-Token is persisted to .ao_token.json (gitignored) to avoid re-login
-across Streamlit restarts — Angel One JWTs are valid for ~24 hours.
+Token is persisted to api/.ao_token.json (gitignored, valid ~24 h)
+so generateSession() is called at most once per day.
 """
 
 import os
@@ -15,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".ao_token.json")
-_TOKEN_TTL  = 23 * 3600  # reuse token for up to 23 h
+_TOKEN_TTL  = 23 * 3600  # reuse for up to 23 h
 
 
 def _ascii(value: str) -> str:
@@ -43,15 +42,15 @@ def _validate_totp_secret(secret: str) -> None:
     if bad:
         raise ValueError(
             f"TOTP secret contains invalid base32 characters: {bad!r}. "
-            "It must contain only A-Z and 2-7."
+            "Must contain only A-Z and 2-7."
         )
     if len(secret) < 8:
-        raise ValueError(f"TOTP secret is too short ({len(secret)} chars).")
+        raise ValueError(f"TOTP secret too short ({len(secret)} chars).")
 
 
 # ── Token file helpers ─────────────────────────────────────────────────────────
 
-def _save_token(access_token: str, refresh_token: str, feed_token: str, profile: dict):
+def _save_token(access_token, refresh_token, feed_token, profile):
     try:
         with open(_TOKEN_FILE, "w") as f:
             json.dump({
@@ -62,11 +61,10 @@ def _save_token(access_token: str, refresh_token: str, feed_token: str, profile:
                 "saved_at":      time.time(),
             }, f)
     except Exception:
-        pass  # non-fatal if file write fails
+        pass
 
 
 def _load_token() -> dict | None:
-    """Return cached token dict if still valid, else None."""
     try:
         with open(_TOKEN_FILE) as f:
             data = json.load(f)
@@ -84,64 +82,17 @@ def _clear_token():
         pass
 
 
-# ── SmartConnect factory ───────────────────────────────────────────────────────
+# ── SmartConnect import ────────────────────────────────────────────────────────
 
-def _get_api(access_token=None, refresh_token=None, feed_token=None):
+def _import_smart_connect():
     try:
         from SmartApi import SmartConnect
+        return SmartConnect
     except ImportError:
         raise ImportError(
             "smartapi-python is not installed. "
             "Run: pip install smartapi-python pyotp websocket-client"
         )
-    return SmartConnect(
-        api_key=_API_KEY,
-        access_token=access_token,
-        refresh_token=refresh_token,
-        feed_token=feed_token,
-    )
-
-
-# ── Login ──────────────────────────────────────────────────────────────────────
-
-def _do_login() -> dict:
-    """Perform a fresh generateSession() call and return token dict or error."""
-    missing = _check_config()
-    if missing:
-        return {"status": False, "error": f"Credentials not configured: {', '.join(missing)}"}
-
-    _validate_totp_secret(_TOTP_SECRET)
-
-    try:
-        totp = pyotp.TOTP(_TOTP_SECRET).now()
-    except Exception as e:
-        return {"status": False, "error": f"Failed to generate TOTP: {e}"}
-
-    try:
-        api  = _get_api()
-        data = api.generateSession(_CLIENT_CODE, _PASSWORD, totp)
-    except Exception as e:
-        return {"status": False, "error": f"Angel One API call failed: {e}"}
-
-    if not data:
-        return {"status": False, "error": "Angel One returned an empty response."}
-
-    status = data.get("status")
-    if status is False or str(status).lower() == "false":
-        msg  = data.get("message") or data.get("errorMessage") or "unknown error"
-        code = data.get("errorCode") or data.get("errorcode") or ""
-        return {"status": False, "error": f"Login failed [{code}]: {msg}"}
-
-    inner = data.get("data") or {}
-    tok = {
-        "access_token":  inner.get("jwtToken"),
-        "refresh_token": inner.get("refreshToken"),
-        "feed_token":    inner.get("feedToken"),
-        "profile":       inner,
-        "saved_at":      time.time(),
-    }
-    _save_token(tok["access_token"], tok["refresh_token"], tok["feed_token"], tok["profile"])
-    return {"status": True, "error": None, **tok}
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -150,11 +101,10 @@ def fetch_all() -> dict:
     """
     Fetch all Angel One trading data.
 
-    Uses a cached token file to skip re-login (valid for 23 h).
-    Only calls generateSession() when the cache is missing or expired.
+    - If a valid token file exists, creates SmartConnect with that token (no re-login).
+    - Otherwise does a fresh generateSession() and saves the token for next time.
 
     Returns dict with keys: login, profile, funds, trades, orders, holdings, positions.
-    Each value: {status, data, error}.
     """
     def _err_all(msg):
         return {
@@ -167,48 +117,77 @@ def fetch_all() -> dict:
             "positions": {"status": False, "data": [],  "error": msg},
         }
 
-    # ── Try cached token first ─────────────────────────────────────────────────
-    cached = _load_token()
-    from_cache = False
-    profile = {}
+    SmartConnect = _import_smart_connect()
 
+    # ── Try cached token (skip login) ──────────────────────────────────────────
+    cached = _load_token()
     if cached:
         try:
-            api = _get_api(cached["access_token"], cached["refresh_token"], cached["feed_token"])
-            from_cache = True
+            api = SmartConnect(
+                api_key=_API_KEY,
+                access_token=cached["access_token"],
+                refresh_token=cached["refresh_token"],
+                feed_token=cached["feed_token"],
+            )
             profile    = cached.get("profile", {})
+            from_cache = True
         except Exception as e:
-            cached = None  # fall through to fresh login
+            cached = None
 
-    # ── Fresh login if no valid cache ──────────────────────────────────────────
+    # ── Fresh login ────────────────────────────────────────────────────────────
     if not cached:
-        login_result = _do_login()
-        if not login_result["status"]:
-            return _err_all(login_result["error"])
+        missing = _check_config()
+        if missing:
+            return _err_all(f"Credentials not configured: {', '.join(missing)}")
+
         try:
-            api = _get_api(login_result["access_token"],
-                           login_result["refresh_token"],
-                           login_result["feed_token"])
-            profile = login_result.get("profile", {})
+            _validate_totp_secret(_TOTP_SECRET)
+            totp = pyotp.TOTP(_TOTP_SECRET).now()
         except Exception as e:
             return _err_all(str(e))
 
+        # Use this SAME api object for data calls — preserves internal state
+        api = SmartConnect(api_key=_API_KEY)
+        try:
+            data = api.generateSession(_CLIENT_CODE, _PASSWORD, totp)
+        except Exception as e:
+            return _err_all(f"Angel One API call failed: {e}")
+
+        if not data:
+            return _err_all("Angel One returned an empty response.")
+
+        status = data.get("status")
+        if status is False or str(status).lower() == "false":
+            msg  = data.get("message") or data.get("errorMessage") or "unknown error"
+            code = data.get("errorCode") or data.get("errorcode") or ""
+            return _err_all(f"Login failed [{code}]: {msg}")
+
+        inner = data.get("data") or {}
+        _save_token(
+            inner.get("jwtToken"),
+            inner.get("refreshToken"),
+            inner.get("feedToken"),
+            inner,
+        )
+        profile    = inner
+        from_cache = False
+
+    # ── Fetch data using the api object (same instance that logged in) ─────────
     def _call(fn, default):
         try:
             resp = fn()
-            # If the API returns a rate-limit or auth error, clear the cache so
-            # the next click does a fresh login instead of reusing a dead token.
             if isinstance(resp, dict):
                 s = resp.get("status")
                 if s is False or str(s).lower() == "false":
                     msg = resp.get("message") or "API error"
-                    if "rate" in msg.lower() or "access" in msg.lower():
+                    if any(k in msg.lower() for k in ("rate", "access denied", "token")):
                         _clear_token()
                     return {"status": False, "data": default, "error": msg}
-            return {"status": True, "data": resp.get("data") or default, "error": None}
+                return {"status": True, "data": resp.get("data") or default, "error": None}
+            return {"status": True, "data": default, "error": None}
         except Exception as e:
             err = str(e)
-            if "rate" in err.lower() or "access" in err.lower():
+            if any(k in err.lower() for k in ("rate", "access denied")):
                 _clear_token()
             return {"status": False, "data": default, "error": err}
 
