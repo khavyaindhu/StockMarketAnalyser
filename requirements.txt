@@ -3,6 +3,7 @@ requests
 python-dotenv
 pandas
 openpyxl
+pytz
 
 # Angel One SmartAPI
 smartapi-python

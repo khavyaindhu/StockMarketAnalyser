@@ -823,3 +823,126 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
         }, na_rep="—")
     )
     st.dataframe(styled_all, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Phase 2: Sell engine (holdings-aware) ──────────────────────────────────
+    st.markdown("### 💰 Phase 2 — Sell Decisions (Your Holdings)")
+    st.caption("Tier-1: sell half at target %. Tier-2: sell rest at 1.5× target %.")
+
+    from trading.phase2 import compute_sell_signals, sell_summary as _sell_summary
+
+    ltp_map = {
+        row["Symbol"]: row["LTP ₹"]
+        for _, row in df_all.iterrows()
+        if pd.notna(row.get("LTP ₹"))
+    }
+    df_sell_p2 = compute_sell_signals(ltp_map)
+
+    if df_sell_p2.empty:
+        st.info("No holdings found. Click **Sync Holdings** to pull your positions from Angel One.")
+    else:
+        stats = _sell_summary(df_sell_p2)
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("Holdings tracked",    len(df_sell_p2))
+        sc2.metric("Sell actions today",  stats["sell_count"])
+        sc3.metric("Sell value ₹",        f"{stats['total_sell_value']:,.0f}" if stats['total_sell_value'] else "—")
+
+        def _action_color(val):
+            if "SELL FULL"  in str(val): return "color:#ef4444; font-weight:bold"
+            if "SELL HALF"  in str(val): return "color:#f97316; font-weight:bold"
+            if "SELL ALL"   in str(val): return "color:#ef4444; font-weight:bold"
+            return "color:#6b7280"
+
+        def _gain_color(val):
+            try:
+                return "color:#22c55e" if float(val) > 0 else "color:#ef4444"
+            except Exception:
+                return ""
+
+        sell_styled = df_sell_p2.style \
+            .map(_action_color, subset=["Action"]) \
+            .map(_gain_color,   subset=["Gain %"])
+        st.dataframe(sell_styled, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Phase 3: Trade plan ────────────────────────────────────────────────────
+    st.markdown("### 📐 Phase 3 — Today's Buy Trade Plan")
+    st.caption("Capital allocated across top signals — sector-capped, budget-aware.")
+
+    from trading.phase3 import build_trade_plan, plan_as_dataframe
+
+    budget_input = st.number_input(
+        "Deployable budget today ₹ (keep ₹30K reserve separately)",
+        min_value=5000, max_value=500000, value=120000, step=5000,
+        key="p3_budget",
+    )
+    trade_plan = build_trade_plan(buys, total_budget=float(budget_input))
+    plan_df    = plan_as_dataframe(trade_plan["plan"])
+
+    p3c1, p3c2, p3c3 = st.columns(3)
+    p3c1.metric("Stocks to buy",   len(trade_plan["plan"]))
+    p3c2.metric("Capital deployed ₹", f"{trade_plan['deployed']:,.0f}")
+    p3c3.metric("Undeployed ₹",    f"{trade_plan['remaining']:,.0f}")
+
+    if not plan_df.empty:
+        st.dataframe(plan_df, use_container_width=True, hide_index=True)
+        with st.expander("Skipped signals (and why)"):
+            if trade_plan["skipped"]:
+                for s in trade_plan["skipped"]:
+                    st.markdown(f"- **{s['Stock']}**: {s.get('skip_reason','—')}")
+            else:
+                st.write("None skipped.")
+    else:
+        st.info("No BUY signals to allocate today.")
+
+    st.divider()
+
+    # ── Phase 4: Paper trade log ───────────────────────────────────────────────
+    st.markdown("### 📓 Phase 4 — Paper Trade Log")
+    st.caption("Log of all signal decisions (no real orders). Run the scheduler to populate this.")
+
+    from trading.phase4 import read_log, daily_summary, run_once as _p4_run_once
+
+    col_p4a, col_p4b = st.columns([1, 3])
+    with col_p4a:
+        run_paper = st.button("▶ Run One Paper Cycle", key="p4_run",
+                              help="Simulate one 15-min cycle right now and log it")
+    with col_p4b:
+        st.caption("Or run the scheduler in terminal: `python -m trading.phase4`")
+
+    if run_paper:
+        with st.spinner("Running paper trade cycle…"):
+            api_obj = _get_live_api()
+            if api_obj:
+                p4_result = _p4_run_once(api_obj)
+                st.success(f"Cycle {p4_result['run_id']} logged {p4_result['log_rows']} rows.")
+
+    log_df = read_log(n_days=7)
+    if log_df.empty:
+        st.info("No paper trade log yet. Click **Run One Paper Cycle** to start.")
+    else:
+        summary = daily_summary(log_df)
+        if summary:
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Runs today",             summary.get("runs_today", 0))
+            d2.metric("BUY signals today",      summary.get("buy_signals", 0))
+            d3.metric("SELL signals today",     summary.get("sell_signals", 0))
+            d4.metric("Hypothetical deployed ₹", f"{summary.get('hypothetical_deployed', 0):,.0f}")
+
+        st.markdown("**Last 7 days — all decisions:**")
+        show_log = log_df[log_df["action"] != "HOLD"].copy()  # hide HOLDs by default
+
+        def _log_color(val):
+            if val == "BUY":       return "color:#22c55e; font-weight:bold"
+            if "SELL" in str(val): return "color:#ef4444; font-weight:bold"
+            return ""
+
+        if not show_log.empty:
+            st.dataframe(
+                show_log.style.map(_log_color, subset=["action"]),
+                use_container_width=True, hide_index=True,
+            )
+        with st.expander("Show HOLD rows too"):
+            st.dataframe(log_df, use_container_width=True, hide_index=True)
