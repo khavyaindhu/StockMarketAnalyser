@@ -690,20 +690,73 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
     if do_sync:
         from trading.phase1 import sync_holdings_from_api
         with st.spinner("Fetching your holdings from Angel One…"):
-            api_obj = _get_live_api()
-            if api_obj:
-                sync_result = sync_holdings_from_api(api_obj)
-                if sync_result["error"]:
-                    st.error(f"Sync error: {sync_result['error']}")
-                else:
-                    synced = sync_result["synced"]
+            # Prefer holdings already fetched in Angel One tab (uses fresh session)
+            ao_holdings_cached = st.session_state.get("ao_holdings")
+            raw_holdings = (ao_holdings_cached or {}).get("data") or []
+
+            if raw_holdings:
+                # Use already-fetched data — no extra API call needed
+                from trading.phase1 import load_holdings
+                from trading.stock_master import STOCK_MAP
+                import openpyxl
+
+                synced, skipped = [], []
+                for h in raw_holdings:
+                    raw_sym = str(h.get("tradingsymbol") or "").upper().replace("-EQ", "").strip()
+                    try:
+                        qty = float(h.get("quantity") or h.get("realisedquantity") or 0)
+                        avg = float(h.get("averageprice") or 0)
+                    except (ValueError, TypeError):
+                        qty, avg = 0, 0
+                    if qty > 0 and avg > 0:
+                        if raw_sym in STOCK_MAP:
+                            synced.append({"symbol": raw_sym, "name": STOCK_MAP[raw_sym]["name"],
+                                           "qty": int(qty), "avg_buy_price": round(avg, 2)})
+                        else:
+                            skipped.append(raw_sym)
+
+                # Write to Excel
+                try:
+                    wb  = openpyxl.load_workbook("stock_config.xlsx")
+                    ws  = wb["My Holdings"]
+                    header = {str(ws.cell(1, c).value).strip().lower(): c
+                              for c in range(1, ws.max_column + 1) if ws.cell(1, c).value}
+                    sym_col = next((v for k, v in header.items() if "symbol" in k), None)
+                    qty_col = next((v for k, v in header.items() if "qty" in k), None)
+                    avg_col = next((v for k, v in header.items() if "avg" in k or "buy price" in k), None)
+                    synced_map = {s["symbol"]: s for s in synced}
+                    for row in range(2, ws.max_row + 1):
+                        sym = str(ws.cell(row, sym_col).value or "").strip().upper()
+                        if sym in synced_map:
+                            ws.cell(row, qty_col).value = synced_map[sym]["qty"]
+                            ws.cell(row, avg_col).value = synced_map[sym]["avg_buy_price"]
+                    wb.save("stock_config.xlsx")
                     st.success(f"✅ Synced {len(synced)} stock(s) into stock_config.xlsx → My Holdings")
                     if synced:
                         sync_df = pd.DataFrame(synced)[["name", "symbol", "qty", "avg_buy_price"]]
                         sync_df.columns = ["Stock", "Symbol", "Qty", "Avg Buy Price ₹"]
                         st.dataframe(sync_df, use_container_width=True, hide_index=True)
-                    if sync_result["skipped"]:
-                        st.info(f"Skipped (not in your 20-stock list): {', '.join(sync_result['skipped'])}")
+                    if skipped:
+                        st.info(f"Skipped (not in 20-stock list): {', '.join(skipped)}")
+                except Exception as e:
+                    st.error(f"Excel write error: {e}")
+            else:
+                # Fallback: try live API call
+                api_obj = _get_live_api()
+                if api_obj:
+                    sync_result = sync_holdings_from_api(api_obj)
+                    if sync_result["error"]:
+                        st.error(f"Sync error: {sync_result['error']}")
+                        st.info("💡 **Fix:** Go to the **Angel One** tab first, click **Fetch from Angel One**, then come back here and click Sync Holdings.")
+                    else:
+                        synced = sync_result["synced"]
+                        st.success(f"✅ Synced {len(synced)} stock(s)")
+                        if synced:
+                            sync_df = pd.DataFrame(synced)[["name", "symbol", "qty", "avg_buy_price"]]
+                            sync_df.columns = ["Stock", "Symbol", "Qty", "Avg Buy Price ₹"]
+                            st.dataframe(sync_df, use_container_width=True, hide_index=True)
+                        if sync_result["skipped"]:
+                            st.info(f"Skipped: {', '.join(sync_result['skipped'])}")
 
     if run_signals:
         from trading.phase1 import fetch_signals
