@@ -39,7 +39,6 @@ def _check_config() -> list[str]:
 
 def _validate_totp_secret(secret: str) -> None:
     """Raise ValueError with a clear message if the TOTP secret is not valid base32."""
-    import base64, binascii
     # base32 alphabet: A-Z and 2-7
     valid = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
     bad = [c for c in secret if c not in valid]
@@ -55,12 +54,6 @@ def _validate_totp_secret(secret: str) -> None:
             f"TOTP secret is too short ({len(secret)} chars). "
             "A valid base32 secret is usually 16–32 characters."
         )
-    # Attempt actual decode to catch padding issues
-    try:
-        padded = secret + "=" * (-len(secret) % 8)
-        base64.b32decode(padded)
-    except (binascii.Error, ValueError) as e:
-        raise ValueError(f"TOTP secret failed base32 decode: {e}") from e
 
 
 def create_session():
