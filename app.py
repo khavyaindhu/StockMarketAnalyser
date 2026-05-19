@@ -361,21 +361,8 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
 
     if fetch_ao:
         import datetime
-        with st.spinner("Authenticating and fetching data from Angel One…"):
-            # Reuse cached token to avoid re-login rate limits
-            cached = st.session_state.get("ao_tokens", {})
-            result = fetch_all(
-                access_token=cached.get("access_token"),
-                refresh_token=cached.get("refresh_token"),
-                feed_token=cached.get("feed_token"),
-            )
-            # Store new tokens if we did a fresh login
-            if result["login"].get("access_token"):
-                st.session_state["ao_tokens"] = {
-                    "access_token":  result["login"]["access_token"],
-                    "refresh_token": result["login"]["refresh_token"],
-                    "feed_token":    result["login"]["feed_token"],
-                }
+        with st.spinner("Fetching data from Angel One…"):
+            result = fetch_all()
             st.session_state["ao_profile"]   = result["profile"]
             st.session_state["ao_funds"]     = result["funds"]
             st.session_state["ao_trades"]    = result["trades"]
@@ -385,29 +372,21 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
             st.session_state["ao_fetched"]   = True
             st.session_state["ao_fetch_time"] = datetime.datetime.now().strftime("%H:%M:%S")
 
-        # Surface auth error prominently
         first_error = result["profile"]["error"]
         if first_error:
             st.error(f"Error: {first_error}")
             _hint = ""
             if "base32" in first_error.lower() or "totp" in first_error.lower():
-                _hint = (
-                    "**TOTP secret issue:** Open `.env` and check `ANGELONE_TOTP_SECRET`. "
-                    "It must be A-Z and 2-7 only (no spaces, no special chars, no 0/1/8/9)."
-                )
-            elif "login failed" in first_error.lower() or "invalid" in first_error.lower():
-                _hint = (
-                    "**Login failed:** Double-check `ANGELONE_CLIENT_CODE`, "
-                    "`ANGELONE_PASSWORD` (4-digit trading PIN), and `ANGELONE_API_KEY`."
-                )
-            elif "rate" in first_error.lower():
-                _hint = "**Rate limit hit:** Wait 60 seconds before clicking Fetch again."
-            elif "not installed" in first_error.lower():
-                _hint = "**Missing package:** Run `pip install smartapi-python pyotp websocket-client`."
+                _hint = "**TOTP secret issue:** Check `ANGELONE_TOTP_SECRET` in `.env` — must be A-Z and 2-7 only."
+            elif "rate" in first_error.lower() or "access" in first_error.lower():
+                _hint = "**Rate limit:** Angel One blocked too many logins. Wait 5–10 minutes and try again. The token cache has been cleared."
+            elif "login failed" in first_error.lower():
+                _hint = "**Login failed:** Double-check `ANGELONE_CLIENT_CODE`, `ANGELONE_PASSWORD`, and `ANGELONE_API_KEY`."
             if _hint:
                 st.info(_hint)
         else:
-            st.success("Data fetched successfully.")
+            from_cache = result["login"].get("from_cache", False)
+            st.success(f"Data fetched successfully. {'(used cached token — no re-login)' if from_cache else '(logged in fresh)'}")
 
     if "ao_fetched" not in st.session_state:
         st.info("Click **Fetch from Angel One** to load your live trading data.")
