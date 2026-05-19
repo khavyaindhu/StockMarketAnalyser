@@ -5,10 +5,7 @@ from api.mediastack import get_india_news
 from api.portfolio import PORTFOLIO, THEMES
 from api.nifty50 import NIFTY_50
 from api.glm5 import analyze_stock, analyze_theme, stream_chat
-from api.angelone import (
-    get_trade_book, get_order_book, get_holdings,
-    get_positions, get_funds, get_profile, is_configured,
-)
+from api.angelone import fetch_all, is_configured
 
 st.set_page_config(page_title="Stock Market Analyser", page_icon="📈", layout="wide")
 st.title("📈 Stock Market Analyser — India Focus")
@@ -365,23 +362,18 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
     if fetch_ao:
         import datetime
         with st.spinner("Authenticating and fetching data from Angel One…"):
-            st.session_state["ao_profile"]   = get_profile()
-            st.session_state["ao_funds"]     = get_funds()
-            st.session_state["ao_trades"]    = get_trade_book()
-            st.session_state["ao_orders"]    = get_order_book()
-            st.session_state["ao_holdings"]  = get_holdings()
-            st.session_state["ao_positions"] = get_positions()
+            result = fetch_all()
+            st.session_state["ao_profile"]   = result["profile"]
+            st.session_state["ao_funds"]     = result["funds"]
+            st.session_state["ao_trades"]    = result["trades"]
+            st.session_state["ao_orders"]    = result["orders"]
+            st.session_state["ao_holdings"]  = result["holdings"]
+            st.session_state["ao_positions"] = result["positions"]
             st.session_state["ao_fetched"]   = True
             st.session_state["ao_fetch_time"] = datetime.datetime.now().strftime("%H:%M:%S")
 
-        # Surface first error prominently so it's easy to diagnose
-        first_error = next(
-            (v["error"] for v in [
-                st.session_state["ao_profile"],
-                st.session_state["ao_funds"],
-            ] if not v["status"]),
-            None,
-        )
+        # Surface auth error prominently
+        first_error = result["profile"]["error"]
         if first_error:
             st.error(f"Authentication failed: {first_error}")
             _hint = ""
@@ -399,6 +391,8 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                 )
             elif "not installed" in first_error.lower():
                 _hint = "**Missing package:** Run `pip install smartapi-python pyotp websocket-client` in the terminal."
+            elif "rate" in first_error.lower():
+                _hint = "**Rate limit:** Wait 30 seconds and try fetching again."
             if _hint:
                 st.info(_hint)
         else:

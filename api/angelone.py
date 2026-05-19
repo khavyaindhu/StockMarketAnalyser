@@ -39,7 +39,6 @@ def _check_config() -> list[str]:
 
 def _validate_totp_secret(secret: str) -> None:
     """Raise ValueError with a clear message if the TOTP secret is not valid base32."""
-    # base32 alphabet: A-Z and 2-7
     valid = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
     bad = [c for c in secret if c not in valid]
     if bad:
@@ -61,11 +60,10 @@ def create_session():
     Authenticate with Angel One SmartAPI and return a live SmartConnect session.
 
     Returns:
-        SmartConnect instance with an active session token, or None on failure.
-        Also returns a dict with the raw login response (tokens, profile, etc.).
+        (SmartConnect, login_data_dict) on success.
 
     Raises:
-        ValueError  if any credentials are missing from .env or TOTP secret is invalid
+        ValueError  if credentials are missing/invalid
         Exception   if SmartAPI login fails
     """
     missing = _check_config()
@@ -82,7 +80,6 @@ def create_session():
             "Run: pip install smartapi-python pyotp websocket-client"
         )
 
-    # Validate TOTP secret before use so errors are readable
     _validate_totp_secret(_TOTP_SECRET)
 
     try:
@@ -104,133 +101,48 @@ def create_session():
     if status is False or str(status).lower() == "false":
         msg = data.get("message") or data.get("errorMessage") or "unknown error"
         code = data.get("errorCode") or data.get("errorcode") or ""
-        raise Exception(
-            f"Angel One login failed [{code}]: {msg}"
-        )
+        raise Exception(f"Angel One login failed [{code}]: {msg}")
 
     return api, data
 
 
-def get_trade_book() -> dict:
+def fetch_all() -> dict:
     """
-    Fetch all executed trades for today's session.
-
-    Returns a dict with keys:
-        status  : bool
-        data    : list of trade dicts, each containing:
-                    symbol, tradingsymbol, exchange, transactiontype,
-                    producttype, quantity, price, tradevalue, orderid,
-                    tradetime, etc.
-        error   : str or None
+    Create a single session and fetch all data in one go.
+    Returns a dict with keys: profile, funds, trades, orders, holdings, positions.
+    Each value follows the {status, data, error} shape.
     """
-    try:
-        api, _ = create_session()
-        resp = api.tradeBook()
-        return {
-            "status": True,
-            "data": resp.get("data") or [],
-            "error": None,
-        }
-    except Exception as e:
-        return {"status": False, "data": [], "error": str(e)}
+    def _err(default):
+        return lambda msg: {"status": False, "data": default, "error": msg}
 
-
-def get_order_book() -> dict:
-    """
-    Fetch all orders placed today (pending, executed, cancelled, rejected).
-
-    Each order dict contains:
-        orderid, tradingsymbol, exchange, transactiontype, producttype,
-        quantity, price, status, orderstatus, text (rejection reason), etc.
-    """
-    try:
-        api, _ = create_session()
-        resp = api.orderBook()
-        return {
-            "status": True,
-            "data": resp.get("data") or [],
-            "error": None,
-        }
-    except Exception as e:
-        return {"status": False, "data": [], "error": str(e)}
-
-
-def get_holdings() -> dict:
-    """
-    Fetch long-term holdings (demat stock positions).
-
-    Each holding dict contains:
-        tradingsymbol, exchange, isin, t1quantity, realisedquantity,
-        quantity, authorisedquantity, producttype, collateralquantity,
-        collateraltype, haircut, averageprice, ltp, symboltoken,
-        close, pnl, totalbuyvalue, totalsellingvalue, etc.
-    """
-    try:
-        api, _ = create_session()
-        resp = api.holding()
-        return {
-            "status": True,
-            "data": resp.get("data") or [],
-            "error": None,
-        }
-    except Exception as e:
-        return {"status": False, "data": [], "error": str(e)}
-
-
-def get_positions() -> dict:
-    """
-    Fetch current open positions (intraday and carry-forward).
-
-    Each position dict contains:
-        tradingsymbol, exchange, producttype, symboltoken, netqty,
-        netprice, buyqty, buyprice, sellqty, sellprice,
-        unrealised, realised, pnl, ltp, close, etc.
-    """
-    try:
-        api, _ = create_session()
-        resp = api.position()
-        return {
-            "status": True,
-            "data": resp.get("data") or [],
-            "error": None,
-        }
-    except Exception as e:
-        return {"status": False, "data": [], "error": str(e)}
-
-
-def get_funds() -> dict:
-    """
-    Fetch available cash and margin limits.
-
-    Returns net, availablecash, utiliseddebits, availablecashmargain,
-    collateral, m2mrealized, m2munrealized, etc.
-    """
-    try:
-        api, _ = create_session()
-        resp = api.rmsLimit()
-        return {
-            "status": True,
-            "data": resp.get("data") or {},
-            "error": None,
-        }
-    except Exception as e:
-        return {"status": False, "data": {}, "error": str(e)}
-
-
-def get_profile() -> dict:
-    """
-    Fetch account profile: name, email, mobile, exchanges, products, etc.
-    """
     try:
         api, login_data = create_session()
-        profile = login_data.get("data", {})
-        return {
-            "status": True,
-            "data": profile,
-            "error": None,
-        }
     except Exception as e:
-        return {"status": False, "data": {}, "error": str(e)}
+        err_str = str(e)
+        return {
+            "profile":   {"status": False, "data": {},  "error": err_str},
+            "funds":     {"status": False, "data": {},  "error": err_str},
+            "trades":    {"status": False, "data": [],  "error": err_str},
+            "orders":    {"status": False, "data": [],  "error": err_str},
+            "holdings":  {"status": False, "data": [],  "error": err_str},
+            "positions": {"status": False, "data": [],  "error": err_str},
+        }
+
+    def _call(fn, default):
+        try:
+            resp = fn()
+            return {"status": True, "data": resp.get("data") or default, "error": None}
+        except Exception as e:
+            return {"status": False, "data": default, "error": str(e)}
+
+    return {
+        "profile":   {"status": True, "data": login_data.get("data", {}), "error": None},
+        "funds":     _call(api.rmsLimit,  {}),
+        "trades":    _call(api.tradeBook, []),
+        "orders":    _call(api.orderBook, []),
+        "holdings":  _call(api.holding,   []),
+        "positions": _call(api.position,  []),
+    }
 
 
 def is_configured() -> bool:
