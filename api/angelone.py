@@ -28,7 +28,6 @@ _TOTP_SECRET = _ascii(os.getenv("ANGELONE_TOTP_SECRET", "")).upper().replace(" "
 
 
 def _check_config() -> list[str]:
-    """Returns a list of missing credential names."""
     missing = []
     if not _API_KEY     or _API_KEY     == "your_api_key_here":     missing.append("ANGELONE_API_KEY")
     if not _CLIENT_CODE or _CLIENT_CODE == "your_client_code_here": missing.append("ANGELONE_CLIENT_CODE")
@@ -38,15 +37,13 @@ def _check_config() -> list[str]:
 
 
 def _validate_totp_secret(secret: str) -> None:
-    """Raise ValueError with a clear message if the TOTP secret is not valid base32."""
     valid = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
     bad = [c for c in secret if c not in valid]
     if bad:
         raise ValueError(
             f"TOTP secret contains invalid base32 characters: {bad!r}. "
             "It must contain only A-Z and 2-7. "
-            "Tip: in Google Authenticator tap the account → key icon → copy the secret. "
-            "Do not include spaces or special characters."
+            "Tip: in Google Authenticator tap the account → key icon → copy the secret."
         )
     if len(secret) < 8:
         raise ValueError(
@@ -55,23 +52,9 @@ def _validate_totp_secret(secret: str) -> None:
         )
 
 
-def create_session():
-    """
-    Authenticate with Angel One SmartAPI and return a live SmartConnect session.
-
-    Returns:
-        (SmartConnect, login_data_dict) on success.
-
-    Raises:
-        ValueError  if credentials are missing/invalid
-        Exception   if SmartAPI login fails
-    """
-    missing = _check_config()
-    if missing:
-        raise ValueError(
-            f"Angel One credentials not configured in .env: {', '.join(missing)}"
-        )
-
+def _get_api(access_token: str | None = None, refresh_token: str | None = None,
+             feed_token: str | None = None):
+    """Return a SmartConnect instance, restored from tokens if provided."""
     try:
         from SmartApi import SmartConnect
     except ImportError:
@@ -79,54 +62,112 @@ def create_session():
             "smartapi-python is not installed. "
             "Run: pip install smartapi-python pyotp websocket-client"
         )
+    return SmartConnect(
+        api_key=_API_KEY,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        feed_token=feed_token,
+    )
+
+
+def login() -> dict:
+    """
+    Perform a fresh login to Angel One and return tokens + profile.
+
+    Returns:
+        {
+          "status": bool,
+          "access_token": str,
+          "refresh_token": str,
+          "feed_token": str,
+          "profile": dict,
+          "error": str | None,
+        }
+    """
+    missing = _check_config()
+    if missing:
+        return {"status": False, "error": f"Credentials not configured: {', '.join(missing)}",
+                "access_token": None, "refresh_token": None, "feed_token": None, "profile": {}}
 
     _validate_totp_secret(_TOTP_SECRET)
 
     try:
         totp = pyotp.TOTP(_TOTP_SECRET).now()
     except Exception as e:
-        raise ValueError(f"Failed to generate TOTP from secret: {e}") from e
-
-    api = SmartConnect(api_key=_API_KEY)
+        return {"status": False, "error": f"Failed to generate TOTP: {e}",
+                "access_token": None, "refresh_token": None, "feed_token": None, "profile": {}}
 
     try:
+        api = _get_api()
         data = api.generateSession(_CLIENT_CODE, _PASSWORD, totp)
     except Exception as e:
-        raise Exception(f"Angel One API call failed: {e}") from e
+        return {"status": False, "error": f"Angel One API call failed: {e}",
+                "access_token": None, "refresh_token": None, "feed_token": None, "profile": {}}
 
     if not data:
-        raise Exception("Angel One returned an empty response. Check your API key and network.")
+        return {"status": False, "error": "Angel One returned an empty response.",
+                "access_token": None, "refresh_token": None, "feed_token": None, "profile": {}}
 
     status = data.get("status")
     if status is False or str(status).lower() == "false":
-        msg = data.get("message") or data.get("errorMessage") or "unknown error"
+        msg  = data.get("message") or data.get("errorMessage") or "unknown error"
         code = data.get("errorCode") or data.get("errorcode") or ""
-        raise Exception(f"Angel One login failed [{code}]: {msg}")
+        return {"status": False, "error": f"Login failed [{code}]: {msg}",
+                "access_token": None, "refresh_token": None, "feed_token": None, "profile": {}}
 
-    return api, data
+    inner = data.get("data") or {}
+    return {
+        "status":        True,
+        "error":         None,
+        "access_token":  inner.get("jwtToken"),
+        "refresh_token": inner.get("refreshToken"),
+        "feed_token":    inner.get("feedToken"),
+        "profile":       inner,
+    }
 
 
-def fetch_all() -> dict:
+def fetch_all(access_token: str | None = None,
+              refresh_token: str | None = None,
+              feed_token: str | None = None) -> dict:
     """
-    Create a single session and fetch all data in one go.
-    Returns a dict with keys: profile, funds, trades, orders, holdings, positions.
-    Each value follows the {status, data, error} shape.
-    """
-    def _err(default):
-        return lambda msg: {"status": False, "data": default, "error": msg}
+    Fetch all trading data using a cached token (no re-login) when provided,
+    or perform a fresh login if no token is available.
 
-    try:
-        api, login_data = create_session()
-    except Exception as e:
-        err_str = str(e)
-        return {
-            "profile":   {"status": False, "data": {},  "error": err_str},
-            "funds":     {"status": False, "data": {},  "error": err_str},
-            "trades":    {"status": False, "data": [],  "error": err_str},
-            "orders":    {"status": False, "data": [],  "error": err_str},
-            "holdings":  {"status": False, "data": [],  "error": err_str},
-            "positions": {"status": False, "data": [],  "error": err_str},
-        }
+    Returns a dict with keys: login, profile, funds, trades, orders, holdings, positions.
+    """
+    _err_all = lambda msg: {
+        "login":     {"status": False, "error": msg,
+                      "access_token": None, "refresh_token": None, "feed_token": None, "profile": {}},
+        "profile":   {"status": False, "data": {}, "error": msg},
+        "funds":     {"status": False, "data": {}, "error": msg},
+        "trades":    {"status": False, "data": [], "error": msg},
+        "orders":    {"status": False, "data": [], "error": msg},
+        "holdings":  {"status": False, "data": [], "error": msg},
+        "positions": {"status": False, "data": [], "error": msg},
+    }
+
+    # ── If we have a cached token, skip re-login ───────────────────────────────
+    if access_token:
+        try:
+            api = _get_api(access_token, refresh_token, feed_token)
+            login_result = {"status": True, "error": None,
+                            "access_token": access_token,
+                            "refresh_token": refresh_token,
+                            "feed_token": feed_token,
+                            "profile": {}}
+        except Exception as e:
+            return _err_all(str(e))
+    else:
+        # ── Fresh login ────────────────────────────────────────────────────────
+        login_result = login()
+        if not login_result["status"]:
+            return _err_all(login_result["error"])
+        try:
+            api = _get_api(login_result["access_token"],
+                           login_result["refresh_token"],
+                           login_result["feed_token"])
+        except Exception as e:
+            return _err_all(str(e))
 
     def _call(fn, default):
         try:
@@ -136,7 +177,8 @@ def fetch_all() -> dict:
             return {"status": False, "data": default, "error": str(e)}
 
     return {
-        "profile":   {"status": True, "data": login_data.get("data", {}), "error": None},
+        "login":     login_result,
+        "profile":   {"status": True, "data": login_result["profile"], "error": None},
         "funds":     _call(api.rmsLimit,  {}),
         "trades":    _call(api.tradeBook, []),
         "orders":    _call(api.orderBook, []),
@@ -146,5 +188,4 @@ def fetch_all() -> dict:
 
 
 def is_configured() -> bool:
-    """Returns True if all four Angel One credentials are set in .env."""
     return len(_check_config()) == 0

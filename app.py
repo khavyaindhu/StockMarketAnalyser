@@ -362,7 +362,20 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
     if fetch_ao:
         import datetime
         with st.spinner("Authenticating and fetching data from Angel One…"):
-            result = fetch_all()
+            # Reuse cached token to avoid re-login rate limits
+            cached = st.session_state.get("ao_tokens", {})
+            result = fetch_all(
+                access_token=cached.get("access_token"),
+                refresh_token=cached.get("refresh_token"),
+                feed_token=cached.get("feed_token"),
+            )
+            # Store new tokens if we did a fresh login
+            if result["login"].get("access_token"):
+                st.session_state["ao_tokens"] = {
+                    "access_token":  result["login"]["access_token"],
+                    "refresh_token": result["login"]["refresh_token"],
+                    "feed_token":    result["login"]["feed_token"],
+                }
             st.session_state["ao_profile"]   = result["profile"]
             st.session_state["ao_funds"]     = result["funds"]
             st.session_state["ao_trades"]    = result["trades"]
@@ -375,24 +388,22 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
         # Surface auth error prominently
         first_error = result["profile"]["error"]
         if first_error:
-            st.error(f"Authentication failed: {first_error}")
+            st.error(f"Error: {first_error}")
             _hint = ""
             if "base32" in first_error.lower() or "totp" in first_error.lower():
                 _hint = (
                     "**TOTP secret issue:** Open `.env` and check `ANGELONE_TOTP_SECRET`. "
-                    "It must be A-Z and 2-7 only (no spaces, no special chars, no 0/1/8/9). "
-                    "Tip: In Angel One app → My Profile → Account Security → View TOTP secret."
+                    "It must be A-Z and 2-7 only (no spaces, no special chars, no 0/1/8/9)."
                 )
             elif "login failed" in first_error.lower() or "invalid" in first_error.lower():
                 _hint = (
-                    "**Login failed:** Double-check `ANGELONE_CLIENT_CODE` (e.g. R123456), "
-                    "`ANGELONE_PASSWORD` (your 4-digit trading PIN), and "
-                    "`ANGELONE_API_KEY` (from smartapi.angelone.in → Apps)."
+                    "**Login failed:** Double-check `ANGELONE_CLIENT_CODE`, "
+                    "`ANGELONE_PASSWORD` (4-digit trading PIN), and `ANGELONE_API_KEY`."
                 )
-            elif "not installed" in first_error.lower():
-                _hint = "**Missing package:** Run `pip install smartapi-python pyotp websocket-client` in the terminal."
             elif "rate" in first_error.lower():
-                _hint = "**Rate limit:** Wait 30 seconds and try fetching again."
+                _hint = "**Rate limit hit:** Wait 60 seconds before clicking Fetch again."
+            elif "not installed" in first_error.lower():
+                _hint = "**Missing package:** Run `pip install smartapi-python pyotp websocket-client`."
             if _hint:
                 st.info(_hint)
         else:
