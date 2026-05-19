@@ -10,9 +10,9 @@ from api.angelone import fetch_all, is_configured
 st.set_page_config(page_title="Stock Market Analyser", page_icon="📈", layout="wide")
 st.title("📈 Stock Market Analyser — India Focus")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🗂 My Portfolio", "🌐 Theme Analysis",
-    "🔍 Nifty 50 News", "🤖 AI Analysis", "💹 Angel One",
+    "🔍 Nifty 50 News", "🤖 AI Analysis", "💹 Angel One", "🤖 Trading Bot",
 ])
 
 
@@ -633,3 +633,170 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                 if "Total P&L ₹" in df.columns:
                     total = df["Total P&L ₹"].sum()
                     st.metric("Total Open P&L ₹", f"{total:,.2f}", delta=f"{total:+.2f}")
+
+
+# ── Tab 6: Trading Bot — Phase 1 ───────────────────────────────────────────────
+with tab6:
+    st.subheader("🤖 Trading Bot — Phase 1: Signal Dashboard")
+    st.caption("Dip-Buy / Rise-Sell signals for your 20-stock watchlist")
+
+    if not is_configured():
+        st.error("Angel One credentials not configured. Fill in `.env` first.")
+        st.stop()
+
+    # ── Setup check ────────────────────────────────────────────────────────────
+    import os
+    excel_exists = os.path.exists("stock_config.xlsx")
+    if not excel_exists:
+        st.warning("**stock_config.xlsx not found.**")
+        st.markdown("""
+Run this once in the Codespace terminal to generate it:
+```bash
+pip install openpyxl
+python create_stock_config.py
+```
+Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price** for any stocks you already own.
+        """)
+        st.stop()
+
+    # ── Fetch button ───────────────────────────────────────────────────────────
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        run_signals = st.button("📡 Fetch Signals", type="primary", key="phase1_fetch")
+    with col_info:
+        if "p1_fetched_at" in st.session_state:
+            st.caption(f"Last fetched: {st.session_state['p1_fetched_at']}")
+
+    if run_signals:
+        from api.angelone import fetch_all as _ao_fetch_all
+        from trading.phase1 import fetch_signals
+
+        with st.spinner("Connecting to Angel One and fetching live prices…"):
+            # Get a live API object (reuses cached token)
+            ao_result = _ao_fetch_all()
+            if not ao_result["login"]["status"]:
+                st.error(f"Angel One auth failed: {ao_result['login']['error']}")
+                st.stop()
+
+            # We need the raw api object — re-create it from cached token
+            from api.angelone import _load_token, _import_smart_connect
+            cached = _load_token()
+            SmartConnect = _import_smart_connect()
+            api_obj = SmartConnect(
+                api_key=__import__("os").getenv("ANGELONE_API_KEY", ""),
+                access_token=cached["access_token"] if cached else None,
+                refresh_token=cached.get("refresh_token") if cached else None,
+                feed_token=cached.get("feed_token") if cached else None,
+            )
+
+            result = fetch_signals(api_obj)
+
+        st.session_state["p1_result"]     = result
+        st.session_state["p1_fetched_at"] = result["fetched_at"]
+
+    if "p1_result" not in st.session_state:
+        st.info("Click **Fetch Signals** to load live prices for all 20 stocks.")
+        st.stop()
+
+    result = st.session_state["p1_result"]
+    df_all = result["signals"]
+    buys   = result["buy_signals"]
+    sells  = result["sell_signals"]
+    errors = result["errors"]
+
+    # ── Summary metrics ────────────────────────────────────────────────────────
+    n_buy  = len(buys)
+    n_sell = len(sells)
+    n_hold = len(df_all) - n_buy - n_sell
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📋 Stocks Tracked", len(df_all))
+    c2.metric("📈 BUY signals",  n_buy,  delta=f"+{n_buy}"  if n_buy  else None)
+    c3.metric("📉 SELL signals", n_sell, delta=f"-{n_sell}" if n_sell else None)
+    c4.metric("⏸ HOLD",         n_hold)
+
+    if errors:
+        with st.expander(f"⚠️ {len(errors)} stocks had fetch errors"):
+            for sym, err in errors:
+                st.markdown(f"- **{sym}**: {err}")
+
+    st.divider()
+
+    # ── BUY signals ────────────────────────────────────────────────────────────
+    if buys:
+        st.markdown("### 📈 BUY Signals Today")
+        st.caption("Stocks that have dipped past your buy threshold — ranked by dip size")
+        buy_df = pd.DataFrame([{
+            "Stock":           b["Stock"],
+            "Symbol":          b["Symbol"],
+            "LTP ₹":           b["LTP ₹"],
+            "Change %":        b["Change %"],
+            "Buy Trigger %":   b["Buy Trigger %"],
+            "Suggested Qty":   b.get("suggested_qty", "—"),
+            "Capital ₹":       b.get("allocated_capital", "—"),
+        } for b in buys])
+
+        def _color_buy(val):
+            try:
+                return "color: #22c55e; font-weight: bold" if float(val) < 0 else ""
+            except Exception:
+                return ""
+
+        styled_buy = buy_df.style.map(_color_buy, subset=["Change %"])
+        st.dataframe(styled_buy, use_container_width=True, hide_index=True)
+    else:
+        st.info("No BUY signals today — no stock has dipped past its threshold.")
+
+    st.divider()
+
+    # ── SELL signals ───────────────────────────────────────────────────────────
+    if sells:
+        st.markdown("### 📉 SELL Signals Today")
+        st.caption("Stocks that have reached your profit target (based on avg buy price)")
+        sell_df = pd.DataFrame([{
+            "Stock":          s["Stock"],
+            "Symbol":         s["Symbol"],
+            "LTP ₹":          s["LTP ₹"],
+            "Avg Buy ₹":      s.get("Avg Buy ₹", "—"),
+            "Sell Target ₹":  s.get("Sell Target ₹", "—"),
+            "Qty Held":       s.get("Qty Held", "—"),
+            "Change %":       s["Change %"],
+        } for s in sells])
+        st.dataframe(sell_df.style, use_container_width=True, hide_index=True)
+    else:
+        st.info("No SELL signals today.")
+
+    st.divider()
+
+    # ── Full signal table ──────────────────────────────────────────────────────
+    st.markdown("### 📋 All 20 Stocks — Full Signal Table")
+
+    def _color_signal(val):
+        if val == "BUY":  return "color: #22c55e; font-weight: bold"
+        if val == "SELL": return "color: #ef4444; font-weight: bold"
+        if val == "HOLD": return "color: #f59e0b"
+        return "color: #6b7280"
+
+    def _color_change(val):
+        try:
+            v = float(val)
+            return "color: #22c55e" if v > 0 else "color: #ef4444" if v < 0 else ""
+        except Exception:
+            return ""
+
+    display_cols = ["Stock", "Category", "LTP ₹", "Prev Close ₹", "Change %",
+                    "Buy Trigger %", "Avg Buy ₹", "Sell Target ₹", "Signal"]
+    show_df = df_all[[c for c in display_cols if c in df_all.columns]].copy()
+
+    styled_all = (
+        show_df.style
+        .map(_color_signal, subset=["Signal"])
+        .map(_color_change, subset=["Change %"])
+        .format({
+            "LTP ₹":         "{:.2f}",
+            "Prev Close ₹":  "{:.2f}",
+            "Change %":      "{:+.2f}%",
+            "Avg Buy ₹":     lambda x: f"{x:.2f}" if pd.notna(x) else "—",
+            "Sell Target ₹": lambda x: f"{x:.2f}" if pd.notna(x) else "—",
+        }, na_rep="—")
+    )
+    st.dataframe(styled_all, use_container_width=True, hide_index=True)

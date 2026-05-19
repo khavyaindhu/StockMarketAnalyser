@@ -2,6 +2,7 @@ streamlit
 requests
 python-dotenv
 pandas
+openpyxl
 
 # Angel One SmartAPI
 smartapi-python
