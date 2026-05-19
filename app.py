@@ -659,36 +659,59 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
         """)
         st.stop()
 
-    # ── Fetch button ───────────────────────────────────────────────────────────
-    col_btn, col_info = st.columns([1, 3])
-    with col_btn:
+    # ── Helper: get live api object ────────────────────────────────────────────
+    def _get_live_api():
+        from api.angelone import fetch_all as _ao_fetch_all, _load_token, _import_smart_connect
+        ao_result = _ao_fetch_all()
+        if not ao_result["login"]["status"]:
+            st.error(f"Angel One auth failed: {ao_result['login']['error']}")
+            return None
+        cached      = _load_token()
+        SmartConnect = _import_smart_connect()
+        return SmartConnect(
+            api_key=__import__("os").getenv("ANGELONE_API_KEY", ""),
+            access_token=cached["access_token"]  if cached else None,
+            refresh_token=cached.get("refresh_token") if cached else None,
+            feed_token=cached.get("feed_token")   if cached else None,
+        )
+
+    # ── Action buttons ─────────────────────────────────────────────────────────
+    col_sync, col_fetch, col_info = st.columns([1, 1, 3])
+    with col_sync:
+        do_sync = st.button("🔄 Sync Holdings", key="phase1_sync",
+                            help="Auto-fill My Holdings sheet from your Angel One demat account")
+    with col_fetch:
         run_signals = st.button("📡 Fetch Signals", type="primary", key="phase1_fetch")
     with col_info:
         if "p1_fetched_at" in st.session_state:
             st.caption(f"Last fetched: {st.session_state['p1_fetched_at']}")
 
+    # ── Sync holdings ──────────────────────────────────────────────────────────
+    if do_sync:
+        from trading.phase1 import sync_holdings_from_api
+        with st.spinner("Fetching your holdings from Angel One…"):
+            api_obj = _get_live_api()
+            if api_obj:
+                sync_result = sync_holdings_from_api(api_obj)
+                if sync_result["error"]:
+                    st.error(f"Sync error: {sync_result['error']}")
+                else:
+                    synced = sync_result["synced"]
+                    st.success(f"✅ Synced {len(synced)} stock(s) into stock_config.xlsx → My Holdings")
+                    if synced:
+                        sync_df = pd.DataFrame(synced)[["name", "symbol", "qty", "avg_buy_price"]]
+                        sync_df.columns = ["Stock", "Symbol", "Qty", "Avg Buy Price ₹"]
+                        st.dataframe(sync_df, use_container_width=True, hide_index=True)
+                    if sync_result["skipped"]:
+                        st.info(f"Skipped (not in your 20-stock list): {', '.join(sync_result['skipped'])}")
+
     if run_signals:
-        from api.angelone import fetch_all as _ao_fetch_all
         from trading.phase1 import fetch_signals
 
         with st.spinner("Connecting to Angel One and fetching live prices…"):
-            # Get a live API object (reuses cached token)
-            ao_result = _ao_fetch_all()
-            if not ao_result["login"]["status"]:
-                st.error(f"Angel One auth failed: {ao_result['login']['error']}")
+            api_obj = _get_live_api()
+            if not api_obj:
                 st.stop()
-
-            # We need the raw api object — re-create it from cached token
-            from api.angelone import _load_token, _import_smart_connect
-            cached = _load_token()
-            SmartConnect = _import_smart_connect()
-            api_obj = SmartConnect(
-                api_key=__import__("os").getenv("ANGELONE_API_KEY", ""),
-                access_token=cached["access_token"] if cached else None,
-                refresh_token=cached.get("refresh_token") if cached else None,
-                feed_token=cached.get("feed_token") if cached else None,
-            )
-
             result = fetch_signals(api_obj)
 
         st.session_state["p1_result"]     = result

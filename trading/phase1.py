@@ -12,10 +12,98 @@ If the Excel isn't filled in yet, sell signals are skipped gracefully.
 """
 
 import os
+import openpyxl
 import pandas as pd
 from datetime import datetime
 
-from .stock_master import STOCK_LIST, lookup_tokens
+from .stock_master import STOCK_LIST, STOCK_MAP, lookup_tokens
+
+
+# ── Sync holdings from Angel One API → Excel ───────────────────────────────────
+
+def sync_holdings_from_api(api, excel_path: str = "stock_config.xlsx") -> dict:
+    """
+    Fetch live holdings from Angel One, filter to the 20-stock watchlist,
+    and write qty + avg_buy_price into the 'My Holdings' sheet of stock_config.xlsx.
+
+    Returns:
+        {
+          "synced":   list of {name, symbol, qty, avg_buy_price} that were updated
+          "skipped":  list of symbols in Angel One holdings NOT in the 20-stock list
+          "error":    str or None
+        }
+    """
+    try:
+        resp = api.holding()
+    except Exception as e:
+        return {"synced": [], "skipped": [], "error": str(e)}
+
+    holdings_raw = (resp or {}).get("data") or []
+    if not holdings_raw:
+        return {"synced": [], "skipped": [], "error": "Angel One returned no holdings data."}
+
+    # Build lookup: strip -EQ suffix, uppercase
+    synced  = []
+    skipped = []
+
+    # Map symbol → {qty, avg_buy_price} from API
+    api_map = {}
+    for h in holdings_raw:
+        raw_sym = str(h.get("tradingsymbol") or "").upper().replace("-EQ", "").strip()
+        try:
+            qty = float(h.get("quantity") or h.get("realisedquantity") or 0)
+            avg = float(h.get("averageprice") or 0)
+        except (ValueError, TypeError):
+            qty, avg = 0, 0
+        if raw_sym and qty > 0 and avg > 0:
+            api_map[raw_sym] = {"qty": int(qty), "avg_buy_price": round(avg, 2),
+                                 "name": h.get("tradingsymbol", raw_sym)}
+
+    # Split into watchlist vs. other holdings
+    for sym, data in api_map.items():
+        if sym in STOCK_MAP:
+            synced.append({"symbol": sym, "name": STOCK_MAP[sym]["name"],
+                           "qty": data["qty"], "avg_buy_price": data["avg_buy_price"]})
+        else:
+            skipped.append(sym)
+
+    if not os.path.exists(excel_path):
+        return {"synced": [], "skipped": list(api_map.keys()),
+                "error": f"{excel_path} not found. Run `python create_stock_config.py` first."}
+
+    # Write to Excel "My Holdings" sheet
+    try:
+        wb  = openpyxl.load_workbook(excel_path)
+        ws  = wb["My Holdings"]
+
+        # Find column indices from header row
+        header = {str(ws.cell(1, c).value).strip().lower(): c
+                  for c in range(1, ws.max_column + 1)
+                  if ws.cell(1, c).value}
+        sym_col = next((v for k, v in header.items() if "symbol" in k), None)
+        qty_col = next((v for k, v in header.items() if "qty" in k), None)
+        avg_col = next((v for k, v in header.items() if "avg" in k or "buy price" in k), None)
+
+        if not (sym_col and qty_col and avg_col):
+            return {"synced": synced, "skipped": skipped,
+                    "error": "Could not find Symbol/Qty/AvgBuy columns in 'My Holdings' sheet."}
+
+        synced_syms = {s["symbol"]: s for s in synced}
+
+        for row in range(2, ws.max_row + 1):
+            cell_sym = ws.cell(row, sym_col).value
+            if not cell_sym:
+                continue
+            sym = str(cell_sym).strip().upper()
+            if sym in synced_syms:
+                ws.cell(row, qty_col).value = synced_syms[sym]["qty"]
+                ws.cell(row, avg_col).value = synced_syms[sym]["avg_buy_price"]
+
+        wb.save(excel_path)
+    except Exception as e:
+        return {"synced": synced, "skipped": skipped, "error": f"Excel write failed: {e}"}
+
+    return {"synced": synced, "skipped": skipped, "error": None}
 
 
 # ── Holdings loader ────────────────────────────────────────────────────────────
