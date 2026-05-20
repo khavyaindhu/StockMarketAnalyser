@@ -584,17 +584,47 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                     except Exception:
                         pass
 
+                    # Build Order Book lookup: symbol → {qty, price} for completed SELL orders
+                    # Trade Book often omits qty/price; Order Book always has them.
+                    ob_lookup: dict[str, dict] = {}
+                    ob_data = (st.session_state.get("ao_orders") or {}).get("data") or []
+                    for ob_row in ob_data:
+                        ob_sym  = str(ob_row.get("tradingsymbol") or "").upper().replace("-EQ", "").strip()
+                        ob_side = str(ob_row.get("transactiontype") or "").upper()
+                        ob_stat = str(ob_row.get("orderstatus") or "").upper()
+                        if ob_side == "SELL" and "COMPLETE" in ob_stat:
+                            try:
+                                ob_lookup[ob_sym] = {
+                                    "qty": float(ob_row.get("quantity") or ob_row.get("qty") or 0),
+                                    "px":  float(ob_row.get("price") or ob_row.get("averageprice") or 0),
+                                }
+                            except (ValueError, TypeError):
+                                pass
+
                     pnl_rows = []
                     for _, tr in sell_trades.iterrows():
                         raw_sym  = str(tr.get("Symbol", "")).upper().replace("-EQ", "").strip()
-                        qty      = tr.get("Qty")
-                        sell_px  = tr.get("Price ₹")
                         sell_val = tr.get("Value ₹")
+
+                        # Prefer Trade Book qty/price; fall back to Order Book
+                        qty     = tr.get("Qty")
+                        sell_px = tr.get("Price ₹")
+                        if (pd.isna(qty) if qty is not None else True) or (pd.isna(sell_px) if sell_px is not None else True):
+                            ob = ob_lookup.get(raw_sym, {})
+                            qty     = ob.get("qty") or qty
+                            sell_px = ob.get("px")  or sell_px
+
+                        # If sell_val is missing, derive from qty × price
+                        if (pd.isna(sell_val) if sell_val is not None else True) and qty and sell_px:
+                            sell_val = round(float(qty) * float(sell_px), 2)
 
                         avg_buy = avg_buy_map.get(raw_sym)
                         if avg_buy and qty and sell_px:
-                            buy_val  = round(float(qty) * avg_buy, 2)
-                            pnl      = round(float(sell_val or (qty * sell_px)) - buy_val, 2)
+                            qty      = float(qty)
+                            sell_px  = float(sell_px)
+                            sell_val = float(sell_val) if sell_val is not None else round(qty * sell_px, 2)
+                            buy_val  = round(qty * avg_buy, 2)
+                            pnl      = round(sell_val - buy_val, 2)
                             pnl_pct  = round(pnl / buy_val * 100, 2) if buy_val else None
                         else:
                             buy_val = pnl = pnl_pct = None
