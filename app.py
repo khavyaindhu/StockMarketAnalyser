@@ -1191,6 +1191,74 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
 
     st.divider()
 
+    # ── Daily Excel Trade Journal ──────────────────────────────────────────────
+    st.markdown("### 📒 Daily Trade Journal (Excel)")
+    st.caption("One sheet per trading day in `logs/paper_trades.xlsx` — auto-updated on every paper cycle.")
+
+    from trading.excel_logger import (
+        EXCEL_FILE as _EXCEL_FILE,
+        get_all_sheet_names as _get_sheets,
+        read_day_as_df as _read_day,
+    )
+
+    sheets = _get_sheets()
+    if not sheets:
+        st.info("No Excel journal yet. Click **▶ Run One Paper Cycle** above to create the first day's sheet.")
+    else:
+        # Download button
+        try:
+            with open(_EXCEL_FILE, "rb") as _f:
+                st.download_button(
+                    label="⬇ Download paper_trades.xlsx",
+                    data=_f.read(),
+                    file_name="paper_trades.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_excel",
+                )
+        except FileNotFoundError:
+            pass
+
+        # Day picker
+        selected_day = st.selectbox("View day:", sheets, key="excel_day_picker")
+        day_df = _read_day(selected_day)
+
+        if day_df.empty:
+            st.info("No data for this day.")
+        else:
+            # Split trade rows from summary rows (summary has no Time value)
+            trade_mask = day_df["Time"].notna() & (day_df["Time"] != "")
+            trade_view = day_df[trade_mask].copy()
+            summ_view  = day_df[~trade_mask].dropna(how="all")
+
+            def _ex_action_color(val):
+                v = str(val).upper()
+                if "BUY"  in v: return "color:#22c55e; font-weight:bold"
+                if "SELL" in v: return "color:#ef4444; font-weight:bold"
+                if "HOLD" in v: return "color:#f59e0b"
+                return ""
+
+            def _ex_pnl_color(val):
+                try:
+                    return "color:#22c55e; font-weight:bold" if float(str(val).replace(",","")) >= 0 else "color:#ef4444; font-weight:bold"
+                except Exception:
+                    return ""
+
+            if not trade_view.empty:
+                styled_ex = trade_view.style
+                if "Action" in trade_view.columns:
+                    styled_ex = styled_ex.map(_ex_action_color, subset=["Action"])
+                if "Profit / Loss ₹" in trade_view.columns:
+                    styled_ex = styled_ex.map(_ex_pnl_color, subset=["Profit / Loss ₹"])
+                st.dataframe(styled_ex, use_container_width=True, hide_index=True)
+
+            if not summ_view.empty:
+                with st.expander("Day Summary"):
+                    st.dataframe(summ_view[["Time", "Symbol"]].rename(
+                        columns={"Time": "Metric", "Symbol": "Value"}
+                    ), use_container_width=True, hide_index=True)
+
+    st.divider()
+
     # ── Phase 5 preview: Live WebSocket Stream ─────────────────────────────────
     st.markdown("### 📡 Live Price Stream (WebSocket)")
     st.caption("Real-time LTP for all 20 stocks via Angel One SmartAPI Streaming 2.0")

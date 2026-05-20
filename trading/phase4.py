@@ -43,6 +43,7 @@ from datetime import datetime, date
 from .phase1 import fetch_signals, load_holdings
 from .phase2 import compute_sell_signals, sell_summary
 from .phase3 import build_trade_plan
+from .excel_logger import write_day as _excel_write_day
 
 LOG_DIR  = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "paper_trade_log.csv")
@@ -200,6 +201,16 @@ def run_once(api, excel_path: str = "stock_config.xlsx",
              f"{len(trade_plan['plan'])} BUY, "
              f"{len([r for r in log_rows if 'SELL' in r['action']])} SELL, "
              f"{len([r for r in log_rows if r['action'] == 'HOLD'])} HOLD")
+
+    # ── Write today's full log to Excel (one sheet per day) ───────────────────
+    try:
+        # Build avg buy map from holdings for P&L column in Excel
+        holdings = load_holdings(excel_path)
+        avg_buy_map = {sym: h["avg_buy_price"] for sym, h in holdings.items() if h["avg_buy_price"] > 0}
+        _excel_write_day(log_rows, avg_buy_map=avg_buy_map, for_date=now.date())
+        log.info(f"Excel daily log updated → logs/paper_trades.xlsx [{now.strftime('%d-%b-%Y')}]")
+    except Exception as e:
+        log.warning(f"Excel write failed (non-critical): {e}")
 
     return {
         "run_id":      run_id,
