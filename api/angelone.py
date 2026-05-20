@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".ao_token.json")
-_TOKEN_TTL  = 23 * 3600  # reuse for up to 23 h
+_TOKEN_TTL  = 6 * 3600   # reuse for up to 6 h (Angel One sessions expire intraday)
 
 
 def _ascii(value: str) -> str:
@@ -187,7 +187,7 @@ def fetch_all() -> dict:
             return {"status": True, "data": default, "error": None}
         except Exception as e:
             err = str(e)
-            if any(k in err.lower() for k in ("rate", "access denied")):
+            if any(k in err.lower() for k in ("rate", "access denied", "invalid token", "ag8001")):
                 _clear_token()
             return {"status": False, "data": default, "error": err}
 

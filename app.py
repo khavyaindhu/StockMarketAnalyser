@@ -380,6 +380,8 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                 _hint = "**TOTP secret issue:** Check `ANGELONE_TOTP_SECRET` in `.env` — must be A-Z and 2-7 only."
             elif "rate" in first_error.lower() or "access" in first_error.lower():
                 _hint = "**Rate limit:** Angel One blocked too many logins. Wait 5–10 minutes and try again. The token cache has been cleared."
+            elif "invalid token" in first_error.lower() or "ag8001" in first_error.lower():
+                _hint = "**Session expired:** Angel One token is no longer valid. The cache has been cleared — click **Fetch from Angel One** again to log in fresh."
             elif "login failed" in first_error.lower():
                 _hint = "**Login failed:** Double-check `ANGELONE_CLIENT_CODE`, `ANGELONE_PASSWORD`, and `ANGELONE_API_KEY`."
             if _hint:
