@@ -2,23 +2,25 @@
 Live Paper Trading Monitor
 
 Runs in a background daemon thread during NSE market hours (9:15–3:30 IST).
-Every 60 seconds it:
-  1. Reads live LTPs from the WebSocket cache (trading/websocket_stream.py)
-     — no extra API calls, uses the already-streaming prices.
-     Falls back to ltpData() API if WebSocket is not running.
-  2. Runs Phase 1 signal logic (dip-buy / rise-sell)
-  3. Runs Phase 2 sell decisions for current holdings
-  4. Runs Phase 3 capital allocation for any BUY signals
-  5. Logs every decision to:
-       logs/paper_trade_log.csv  (Phase 4 format, for analytics)
-       logs/paper_trades.xlsx    (Excel daily sheet, one tab per day)
-  6. Stores the last N decisions in MonitorState for live display in the UI
+Checks prices every 60 seconds and logs paper BUY/SELL decisions.
 
-Usage (from app.py):
-  from trading.monitor import start_monitor, stop_monitor, is_running, MonitorState
+Core sell rule (hard-coded, never overridden):
+  SELL only when current price > avg buy price (i.e. profit exists).
+  If a stock is in loss, hold indefinitely until it recovers.
+  Profit is always measured from the average acquisition price, not
+  from today's open or any real-time reference.
+
+This means:
+  Bought CIPLA at ₹1400 → dips to ₹1200 → HOLD (loss, wait)
+  Two months later → rises to ₹1500 → SELL HALF at +7.1% profit ✓
+
+Pipeline used (same as Phase 4, just every 60s instead of 15 min):
+  Phase 1 → fetch live LTPs + dip-buy signals
+  Phase 2 → sell signals (profit-only, never-at-loss guardrail built in)
+  Phase 3 → capital allocation for buy signals
+  Phase 4 → log to CSV + Excel daily sheet
 """
 
-import os
 import time
 import threading
 import logging
@@ -30,19 +32,21 @@ log = logging.getLogger("monitor")
 IST          = pytz.timezone("Asia/Kolkata")
 MARKET_OPEN  = (9, 15)
 MARKET_CLOSE = (15, 30)
-INTERVAL_SEC = 60          # check every 60 seconds
+INTERVAL_SEC = 60
 
-# ── Shared state (read by Streamlit UI without locks for display only) ─────────
+
+# ── Shared UI state ────────────────────────────────────────────────────────────
 class MonitorState:
-    running       = False
-    last_run_time = None       # "HH:MM:SS" string
-    last_run_id   = None
-    recent_decisions: list[dict] = []   # last 50 BUY/SELL decisions
-    cycle_count   = 0
-    errors        : list[str]   = []    # last 10 errors
+    running           = False
+    last_run_time     = None
+    last_run_id       = None
+    cycle_count       = 0
+    recent_decisions  : list[dict] = []   # last 50 BUY/SELL actions
+    errors            : list[str]  = []   # last 10 errors
 
-_thread: threading.Thread | None = None
-_stop   = threading.Event()
+
+_thread : threading.Thread | None = None
+_stop    = threading.Event()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -59,179 +63,159 @@ def _is_market_open() -> bool:
     return MARKET_OPEN <= t <= MARKET_CLOSE
 
 
-def _get_ltp_map(api) -> dict[str, float]:
-    """
-    Get LTPs for all 20 stocks.
-    Prefers the WebSocket cache (already streaming, no API cost).
-    Falls back to ltpData() if WebSocket is not active or cache is stale.
-    """
-    from . import websocket_stream as _ws
-    from .stock_master import STOCK_LIST
+# ── One 60-second cycle ────────────────────────────────────────────────────────
 
+def _run_cycle(api, excel_path: str, total_budget: float) -> str:
+    """
+    Execute one full signal + log cycle using the Phase 1→2→3→4 pipeline.
+    Returns the run_id string.
+    """
+    from .phase4 import run_once, _ensure_log
+    from . import websocket_stream as _ws
+
+    now    = _ist_now()
+    run_id = now.strftime("%Y%m%d_%H%M%S")   # second-level ID for 60s cadence
+
+    # If WebSocket is streaming we already have live LTPs; pass them to
+    # fetch_signals via a thin wrapper so Phase 1 skips the API poll
+    # and uses cached prices instead (saves 20 API calls/minute).
     ws_prices = _ws.get_all_ltp()
 
-    # If WebSocket has prices for at least 10 of 20 stocks, use it
-    if len(ws_prices) >= 10:
-        return ws_prices
+    if len(ws_prices) >= 15:
+        # WebSocket has enough prices → build signals directly from cache
+        result = _run_cycle_from_ws(api, excel_path, total_budget, ws_prices, run_id, now)
+    else:
+        # Fall back to full Phase 4 run_once() which calls ltpData() per stock
+        result = run_once(api, excel_path=excel_path, total_budget=total_budget)
 
-    # Fallback: fetch via API
-    ltp_map = {}
-    for stock in STOCK_LIST:
-        sym = stock["symbol"]
-        try:
-            resp = api.ltpData("NSE", f"{sym}-EQ", "")
-            data = (resp or {}).get("data") or {}
-            ltp  = data.get("ltp")
-            if ltp:
-                ltp_map[sym] = float(ltp)
-        except Exception:
-            pass
-    return ltp_map
+    # Extract actionable rows for UI display
+    log_rows = result.get("_raw_log_rows", [])
+    active   = [r for r in log_rows if r.get("action", "HOLD") != "HOLD"]
+    for r in active:
+        r["_run_time"] = now.strftime("%H:%M:%S")
+    MonitorState.recent_decisions = (active + MonitorState.recent_decisions)[:50]
+
+    buys  = sum(1 for r in log_rows if r.get("action") == "BUY")
+    sells = sum(1 for r in log_rows if "SELL" in str(r.get("action", "")))
+    log.info(f"[{now.strftime('%H:%M:%S')}] {run_id} — "
+             f"{buys} BUY, {sells} SELL, {len(log_rows)-buys-sells} HOLD")
+    return run_id
 
 
-# ── One monitoring cycle ────────────────────────────────────────────────────────
-
-def _run_cycle(api, excel_path: str, total_budget: float):
-    from .phase1 import fetch_signals, load_holdings
+def _run_cycle_from_ws(api, excel_path, total_budget, ws_prices, run_id, now):
+    """
+    Build paper trade decisions from WebSocket LTP cache, log to CSV + Excel.
+    Mirrors phase4.run_once() but skips the API price fetch step.
+    """
+    import os, csv
+    from .phase1 import load_holdings
     from .phase2 import compute_sell_signals
     from .phase3 import build_trade_plan
     from .phase4 import _ensure_log, _append_rows, LOG_FIELDS
-    from .excel_logger import write_day as _excel_write, EXCEL_FILE
+    from .excel_logger import write_day as _excel_write
     from .stock_master import STOCK_LIST, STOCK_MAP
 
-    now    = _ist_now()
-    run_id = now.strftime("%Y%m%d_%H%M")
-    today  = now.strftime("%Y-%m-%d")
-    t_str  = now.strftime("%H:%M:%S")
+    today = now.strftime("%Y-%m-%d")
+    t_str = now.strftime("%H:%M:%S")
 
-    # ── Get live prices ────────────────────────────────────────────────────────
-    ltp_map = _get_ltp_map(api)
-    if not ltp_map:
-        raise RuntimeError("Could not fetch any LTP data")
-
-    # ── Load holdings for sell signal context ──────────────────────────────────
     holdings = load_holdings(excel_path)
 
-    # ── Phase 1: build signal rows from ltp_map ────────────────────────────────
-    buy_signals  = []
-    sell_signals = []
-    log_rows     = []
-
+    # ── Build buy signals from WebSocket LTPs ──────────────────────────────────
+    # (We don't have prev_close from WS, so use avg_buy as dip reference.)
+    buy_signals = []
     for stock in STOCK_LIST:
-        sym     = stock["symbol"]
-        ltp     = ltp_map.get(sym)
+        sym    = stock["symbol"]
+        ltp    = ws_prices.get(sym)
         if not ltp:
             continue
-
-        holding    = holdings.get(sym, {})
-        avg_buy    = holding.get("avg_buy_price", 0)
-        held_qty   = holding.get("qty", 0)
-        buy_dip    = stock["buy_dip_pct"]
-        sell_tgt   = stock["sell_target_pct"]
-
-        # Approximate prev close = ltp / (1 + change%) — we don't have it here
-        # so signal is based on intraday dip from open; use a simplified check:
-        # BUY if ltp has dropped by buy_dip_pct from avg_buy (only when held)
-        # or if ltp is a fresh dip buy opportunity (no prior context without prev close)
-        # For paper trading, we flag BUY when price is below avg_buy by dip%
-        signal = "HOLD"
-        reason = "No trigger"
+        holding  = holdings.get(sym, {})
+        avg_buy  = holding.get("avg_buy_price", 0)
+        buy_dip  = stock["buy_dip_pct"]
+        max_cap  = stock["max_capital"]
 
         if avg_buy > 0 and ltp <= avg_buy * (1 - buy_dip / 100):
-            signal = "BUY"
-            reason = f"Price ₹{ltp:.2f} dipped {buy_dip}% below avg buy ₹{avg_buy:.2f}"
             buy_signals.append({
-                "Symbol":    sym, "Stock": stock["name"],
+                "Symbol":    sym,
+                "Stock":     stock["name"],
                 "Category":  stock["category"],
-                "ltp":       ltp, "LTP ₹": ltp,
+                "ltp":       ltp,
+                "LTP ₹":    ltp,
                 "Change %":  round((ltp - avg_buy) / avg_buy * 100, 2),
-                "max_capital": stock["max_capital"],
+                "max_capital": max_cap,
             })
 
-        if avg_buy > 0 and held_qty > 0:
-            tier1 = avg_buy * (1 + sell_tgt / 100)
-            tier2 = avg_buy * (1 + sell_tgt * 1.5 / 100)
-            if ltp >= tier2:
-                signal = "SELL"
-                reason = f"Price ₹{ltp:.2f} hit Tier-2 target ₹{tier2:.2f}"
-                sell_signals.append(sym)
-            elif ltp >= tier1:
-                signal = "SELL"
-                reason = f"Price ₹{ltp:.2f} hit Tier-1 target ₹{tier1:.2f}"
-                sell_signals.append(sym)
+    # ── Phase 2: sell decisions (profit-only guard is inside compute_sell_signals)
+    df_sell = compute_sell_signals(ws_prices, excel_path)
 
-        log_rows.append({
-            "date":            today,
-            "time":            t_str,
-            "run_id":          run_id,
-            "symbol":          sym,
-            "stock":           stock["name"],
-            "category":        stock["category"],
-            "action":          signal,
-            "signal_price":    round(ltp, 2),
-            "qty":             0,
-            "amount":          0,
-            "gain_pct":        "",
-            "reason":          reason,
-            "buy_trigger_pct": buy_dip,
-            "sell_target_price": round(avg_buy * (1 + sell_tgt / 100), 2) if avg_buy else "",
-        })
-
-    # ── Phase 3: allocate capital to buy signals ───────────────────────────────
+    # ── Phase 3: allocate buys ─────────────────────────────────────────────────
     trade_plan = build_trade_plan(buy_signals, total_budget=total_budget)
+
+    # ── Build log rows ─────────────────────────────────────────────────────────
+    log_rows = []
+    actioned = set()
+
     for item in trade_plan["plan"]:
         sym = item["Symbol"]
-        for r in log_rows:
-            if r["symbol"] == sym and r["action"] == "BUY":
-                r["qty"]    = item["Buy Qty"]
-                r["amount"] = item["Amount ₹"]
-                break
+        actioned.add(sym)
+        log_rows.append({
+            "date": today, "time": t_str, "run_id": run_id,
+            "symbol": sym, "stock": item["Stock"], "category": item["Category"],
+            "action": "BUY", "signal_price": item["LTP ₹"],
+            "qty": item["Buy Qty"], "amount": item["Amount ₹"],
+            "gain_pct": "", "reason": f"WS dip {item['Dip %']:+.2f}% vs avg buy",
+            "buy_trigger_pct": "", "sell_target_price": "",
+        })
 
-    # ── Phase 2: sell decisions ────────────────────────────────────────────────
-    df_sell = compute_sell_signals(ltp_map, excel_path)
     if not df_sell.empty:
         for _, row in df_sell[df_sell["Action"].str.contains("SELL", na=False)].iterrows():
             sym = row["Symbol"]
-            for r in log_rows:
-                if r["symbol"] == sym:
-                    r["action"] = row["Action"]
-                    r["qty"]    = row["Sell Qty"]
-                    r["amount"] = row["Sell Value ₹"]
-                    r["gain_pct"] = row["Gain %"]
-                    r["reason"] = f"Price ₹{row['LTP ₹']} hit target ₹{row['Tier-1 Target ₹']}"
-                    break
+            actioned.add(sym)
+            log_rows.append({
+                "date": today, "time": t_str, "run_id": run_id,
+                "symbol": sym, "stock": row["Stock"], "category": row["Category"],
+                "action": row["Action"], "signal_price": row["LTP ₹"],
+                "qty": row["Sell Qty"], "amount": row["Sell Value ₹"],
+                "gain_pct": row["Gain %"],
+                "reason": f"Price ₹{row['LTP ₹']} hit target ₹{row['Tier-1 Target ₹']}",
+                "buy_trigger_pct": "", "sell_target_price": row["Tier-1 Target ₹"],
+            })
 
-    # ── Append to CSV ──────────────────────────────────────────────────────────
+    for stock in STOCK_LIST:
+        sym = stock["symbol"]
+        ltp = ws_prices.get(sym)
+        if sym not in actioned:
+            log_rows.append({
+                "date": today, "time": t_str, "run_id": run_id,
+                "symbol": sym, "stock": stock["name"], "category": stock["category"],
+                "action": "HOLD", "signal_price": round(ltp, 2) if ltp else "",
+                "qty": 0, "amount": 0, "gain_pct": "",
+                "reason": "No trigger", "buy_trigger_pct": stock["buy_dip_pct"],
+                "sell_target_price": "",
+            })
+
     _ensure_log()
     _append_rows(log_rows)
 
-    # ── Write to Excel ─────────────────────────────────────────────────────────
     avg_buy_map = {s: h["avg_buy_price"] for s, h in holdings.items() if h["avg_buy_price"] > 0}
     try:
         _excel_write(log_rows, avg_buy_map=avg_buy_map, for_date=now.date())
     except Exception as e:
         log.warning(f"Excel write failed: {e}")
 
-    # ── Store actionable decisions for UI ──────────────────────────────────────
-    active = [r for r in log_rows if r["action"] != "HOLD"]
-    for r in active:
-        r["_run_time"] = t_str
-    MonitorState.recent_decisions = (active + MonitorState.recent_decisions)[:50]
-
-    buys  = sum(1 for r in log_rows if r["action"] == "BUY")
-    sells = sum(1 for r in log_rows if "SELL" in r["action"])
-    log.info(f"[{t_str}] Cycle {run_id} — {buys} BUY, {sells} SELL, "
-             f"{len(log_rows)-buys-sells} HOLD")
-
-    return run_id
+    return {
+        "run_id": run_id,
+        "_raw_log_rows": log_rows,
+        "errors": [],
+    }
 
 
 # ── Background thread loop ──────────────────────────────────────────────────────
 
 def _monitor_loop(api, excel_path: str, total_budget: float):
-    MonitorState.running = True
+    MonitorState.running     = True
     MonitorState.cycle_count = 0
-    log.info("Monitor started. Checking every 60s during market hours.")
+    log.info("Live monitor started — checking every 60s during market hours.")
+    log.info("SELL rule: only when price > avg buy price (profit-only, hold at loss).")
 
     while not _stop.is_set():
         now = _ist_now()
@@ -248,14 +232,12 @@ def _monitor_loop(api, excel_path: str, total_budget: float):
                 MonitorState.errors = ([err] + MonitorState.errors)[:10]
         else:
             if now.weekday() >= 5:
-                log.info("Weekend — monitor idle.")
-                _stop.wait(3600)
-                continue
+                _stop.wait(3600); continue
             elif (now.hour, now.minute) < MARKET_OPEN:
                 mins = (MARKET_OPEN[0]*60 + MARKET_OPEN[1]) - (now.hour*60 + now.minute)
                 log.info(f"Pre-market — {mins} min until open.")
             else:
-                log.info("Market closed — monitor idle.")
+                log.info("Market closed for today.")
 
         _stop.wait(INTERVAL_SEC)
 
@@ -272,7 +254,7 @@ def start_monitor(api, excel_path: str = "stock_config.xlsx",
         return False
     _stop.clear()
     MonitorState.recent_decisions = []
-    MonitorState.errors = []
+    MonitorState.errors           = []
     _thread = threading.Thread(
         target=_monitor_loop,
         args=(api, excel_path, total_budget),

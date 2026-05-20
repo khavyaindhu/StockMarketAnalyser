@@ -73,6 +73,18 @@ def compute_sell_signals(
         action    = "HOLD"
         sell_qty  = 0
 
+        # Hard rule: NEVER sell at a loss. If LTP <= avg_buy, always HOLD
+        # regardless of any other condition. Profit is measured from avg buy price.
+        if ltp <= avg_buy:
+            rows.append({
+                "Stock": stock["name"], "Symbol": sym, "Category": stock["category"],
+                "Qty Held": qty, "Avg Buy ₹": avg_buy, "LTP ₹": ltp,
+                "Gain %": gain_pct, "Tier-1 Target ₹": tier1_price,
+                "Tier-2 Target ₹": tier2_price, "Sell Qty": 0,
+                "Sell Value ₹": 0, "Action": "HOLD (at loss — waiting for recovery)",
+            })
+            continue
+
         if ltp >= tier2_price and partial_sell:
             action   = f"SELL FULL (Tier-2: +{sell_pct * 1.5:.1f}%)"
             sell_qty = qty
