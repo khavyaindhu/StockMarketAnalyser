@@ -864,6 +864,75 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
             feed_token=cached.get("feed_token")   if cached else None,
         )
 
+    # ── Live Monitor (top of tab) ──────────────────────────────────────────────
+    from trading import monitor as _mon
+
+    st.markdown("### 🔴 Live Paper Monitor")
+    st.caption("Checks all 20 stocks every 60 seconds during market hours (9:15–3:30 IST) and logs paper BUY/SELL decisions automatically.")
+
+    mon_col1, mon_col2, mon_col3 = st.columns([1, 1, 3])
+    with mon_col1:
+        mon_budget = st.number_input("Daily budget ₹", min_value=10000,
+                                     max_value=500000, value=120000, step=10000,
+                                     key="mon_budget")
+    with mon_col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        start_mon = st.button("▶ Start Monitor", key="mon_start",
+                              disabled=_mon.is_running())
+        stop_mon  = st.button("⏹ Stop Monitor",  key="mon_stop",
+                              disabled=not _mon.is_running())
+    with mon_col3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if _mon.is_running():
+            st.success(f"🟢 **Running** — cycle #{_mon.MonitorState.cycle_count}  "
+                       f"| Last check: {_mon.MonitorState.last_run_time or '—'}  "
+                       f"| Next in ~60s")
+        else:
+            st.info("⚫ Monitor stopped — click **▶ Start Monitor** to begin.")
+
+    if start_mon:
+        api_obj = _get_live_api()
+        if api_obj:
+            ok = _mon.start_monitor(api_obj, excel_path="stock_config.xlsx",
+                                    total_budget=float(mon_budget))
+            if ok:
+                st.success("Monitor started — checking prices every 60 seconds. "
+                           "Keep this browser tab open.")
+                st.rerun()
+            else:
+                st.warning("Monitor is already running.")
+
+    if stop_mon:
+        _mon.stop_monitor()
+        st.info("Monitor stopped.")
+        st.rerun()
+
+    # Live decision feed
+    if _mon.MonitorState.recent_decisions:
+        with st.expander(f"📋 Latest decisions ({len(_mon.MonitorState.recent_decisions)} actions)", expanded=True):
+            feed_df = pd.DataFrame(_mon.MonitorState.recent_decisions)
+            show_cols = [c for c in ["_run_time","symbol","stock","action",
+                                     "signal_price","qty","amount","reason"]
+                         if c in feed_df.columns]
+            feed_df = feed_df[show_cols].rename(columns={
+                "_run_time": "Time", "symbol": "Symbol", "stock": "Stock",
+                "action": "Action", "signal_price": "Price ₹",
+                "qty": "Qty", "amount": "Amount ₹", "reason": "Reason",
+            })
+            def _feed_color(val):
+                if "BUY"  in str(val).upper(): return "color:#22c55e;font-weight:bold"
+                if "SELL" in str(val).upper(): return "color:#ef4444;font-weight:bold"
+                return ""
+            st.dataframe(feed_df.style.map(_feed_color, subset=["Action"]),
+                         use_container_width=True, hide_index=True)
+
+    if _mon.MonitorState.errors:
+        with st.expander("⚠️ Monitor errors"):
+            for e in _mon.MonitorState.errors:
+                st.error(e)
+
+    st.divider()
+
     # ── Action buttons ─────────────────────────────────────────────────────────
     col_sync, col_fetch, col_info = st.columns([1, 1, 3])
     with col_sync:
