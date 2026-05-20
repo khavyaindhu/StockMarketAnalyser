@@ -177,13 +177,16 @@ def fetch_all() -> dict:
         try:
             resp = fn()
             if isinstance(resp, dict):
-                s = resp.get("status")
+                # Angel One uses both "status" and "success" keys across endpoints
+                s = resp.get("status") if "status" in resp else resp.get("success")
                 if s is False or str(s).lower() == "false":
-                    msg = resp.get("message") or "API error"
-                    if any(k in msg.lower() for k in ("rate", "access denied", "token")):
+                    msg = resp.get("message") or resp.get("errorMessage") or "API error"
+                    if any(k in msg.lower() for k in ("rate", "access denied", "token", "invalid")):
                         _clear_token()
                     return {"status": False, "data": default, "error": msg}
-                return {"status": True, "data": resp.get("data") or default, "error": None}
+                # Data may be under "data" key or at the top level
+                inner = resp.get("data")
+                return {"status": True, "data": inner if inner is not None else default, "error": None}
             return {"status": True, "data": default, "error": None}
         except Exception as e:
             err = str(e)

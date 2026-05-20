@@ -441,32 +441,37 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
 
         with col_f:
             st.markdown("#### Funds & Margins")
-            if not _ao_error(funds_res, "Funds"):
-                f = funds_res["data"]
+            if funds_res["status"] is False:
+                st.error(f"Funds error: {funds_res['error']}")
+            else:
+                f = funds_res["data"] or {}
+                def _fval(key):
+                    v = f.get(key, "")
+                    return v if v not in ("", None) else "—"
+
+                fund_rows = [
+                    ("Net Available (₹)",          _fval("net")),
+                    ("Available Cash (₹)",          _fval("availablecash")),
+                    ("Available Cash Margin (₹)",   _fval("availablecashmargain")),
+                    ("Collateral (₹)",              _fval("collateral")),
+                    ("Utilised Debits (₹)",         _fval("utiliseddebits")),
+                    ("M2M Realised (₹)",            _fval("m2mrealized")),
+                    ("M2M Unrealised (₹)",          _fval("m2munrealized")),
+                ]
+
                 if not f:
-                    st.info("Funds data unavailable outside market hours. Try fetching after 9:00 AM IST.")
-                else:
-                    def _fval(key):
-                        v = f.get(key, "")
-                        return v if v not in ("", None) else "—"
+                    st.warning("Angel One returned no funds data. This sometimes happens with a cached token — click **Fetch from Angel One** to force a fresh login.")
+                elif all(v == "—" for _, v in fund_rows):
+                    # Fields exist but use different key names — show raw
+                    st.caption("Showing raw fields from API (field names differ from expected):")
+                    fund_rows = [(k, str(v)) for k, v in f.items() if v not in ("", None)]
 
-                    fund_rows = [
-                        ("Net Available (₹)",          _fval("net")),
-                        ("Available Cash (₹)",          _fval("availablecash")),
-                        ("Available Cash Margin (₹)",   _fval("availablecashmargain")),
-                        ("Collateral (₹)",              _fval("collateral")),
-                        ("Utilised Debits (₹)",         _fval("utiliseddebits")),
-                        ("M2M Realised (₹)",            _fval("m2mrealized")),
-                        ("M2M Unrealised (₹)",          _fval("m2munrealized")),
-                    ]
-                    # If all standard fields are "—", show whatever keys exist
-                    if all(v == "—" for _, v in fund_rows) and f:
-                        st.caption("Standard fields empty — showing all available fields:")
-                        fund_rows = [(k, str(v)) for k, v in f.items() if v not in ("", None)]
-
+                if fund_rows:
                     funds_df = pd.DataFrame(fund_rows, columns=["Item", "Value"])
                     st.dataframe(funds_df, use_container_width=True, hide_index=True)
-                with st.expander("Raw API response (debug)"):
+
+                # Always show raw debug, expanded when data is missing
+                with st.expander("Raw API response (debug)", expanded=not bool(f)):
                     st.json(f)
 
     # ── AO Sub-tab 2: Trade Book ───────────────────────────────────────────────
