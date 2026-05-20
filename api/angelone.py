@@ -8,8 +8,11 @@ so generateSession() is called at most once per day.
 import os
 import json
 import time
+import logging
 import pyotp
 from dotenv import load_dotenv
+
+log = logging.getLogger("angelone")
 
 load_dotenv()
 
@@ -173,35 +176,97 @@ def fetch_all() -> dict:
         from_cache = False
 
     # ── Fetch data using the api object (same instance that logged in) ─────────
+    _token_expired = False
+
+    def _is_token_error(text: str) -> bool:
+        t = text.lower()
+        return any(k in t for k in ("invalid token", "ag8001", "token expired", "unauthorized"))
+
     def _call(fn, default):
+        nonlocal _token_expired
         try:
             resp = fn()
             if isinstance(resp, dict):
-                # Angel One uses both "status" and "success" keys across endpoints
                 s = resp.get("status") if "status" in resp else resp.get("success")
                 if s is False or str(s).lower() == "false":
                     msg = resp.get("message") or resp.get("errorMessage") or "API error"
-                    if any(k in msg.lower() for k in ("rate", "access denied", "token", "invalid")):
+                    if _is_token_error(msg) or any(k in msg.lower() for k in ("rate", "access denied")):
                         _clear_token()
+                        _token_expired = True
                     return {"status": False, "data": default, "error": msg}
-                # Data may be under "data" key or at the top level
                 inner = resp.get("data")
                 return {"status": True, "data": inner if inner is not None else default, "error": None}
             return {"status": True, "data": default, "error": None}
         except Exception as e:
             err = str(e)
-            if any(k in err.lower() for k in ("rate", "access denied", "invalid token", "ag8001")):
+            if _is_token_error(err) or any(k in err.lower() for k in ("rate", "access denied")):
                 _clear_token()
+                _token_expired = True
             return {"status": False, "data": default, "error": err}
 
-    return {
-        "login":     {"status": True, "error": None, "from_cache": from_cache},
-        "profile":   {"status": True, "data": profile, "error": None},
+    data_results = {
         "funds":     _call(api.rmsLimit,  {}),
         "trades":    _call(api.tradeBook, []),
         "orders":    _call(api.orderBook, []),
         "holdings":  _call(api.holding,   []),
         "positions": _call(api.position,  []),
+    }
+
+    # ── Cached token was rejected — do a fresh login and retry once ────────────
+    if _token_expired and from_cache:
+        log.info("Cached token rejected by Angel One — doing fresh login…")
+        _clear_token()
+        missing = _check_config()
+        if missing:
+            return _err_all(f"Credentials not configured: {', '.join(missing)}")
+        try:
+            _validate_totp_secret(_TOTP_SECRET)
+            totp = pyotp.TOTP(_TOTP_SECRET).now()
+            api2 = SmartConnect(api_key=_API_KEY)
+            data2 = api2.generateSession(_CLIENT_CODE, _PASSWORD, totp)
+        except Exception as e:
+            return _err_all(f"Re-login failed: {e}")
+
+        if not data2:
+            return _err_all("Re-login returned empty response.")
+        status2 = data2.get("status")
+        if status2 is False or str(status2).lower() == "false":
+            msg2 = data2.get("message") or "unknown error"
+            return _err_all(f"Re-login failed: {msg2}")
+
+        inner2 = data2.get("data") or {}
+        _save_token(inner2.get("jwtToken"), inner2.get("refreshToken"),
+                    inner2.get("feedToken"), inner2)
+        profile = inner2
+
+        def _call2(fn, default):
+            try:
+                resp = fn()
+                if isinstance(resp, dict):
+                    s = resp.get("status") if "status" in resp else resp.get("success")
+                    if s is False or str(s).lower() == "false":
+                        msg = resp.get("message") or "API error"
+                        return {"status": False, "data": default, "error": msg}
+                    inner = resp.get("data")
+                    return {"status": True, "data": inner if inner is not None else default, "error": None}
+                return {"status": True, "data": default, "error": None}
+            except Exception as e:
+                return {"status": False, "data": default, "error": str(e)}
+
+        return {
+            "login":     {"status": True, "error": None, "from_cache": False},
+            "profile":   {"status": True, "data": profile, "error": None},
+            "funds":     _call2(api2.rmsLimit,  {}),
+            "trades":    _call2(api2.tradeBook, []),
+            "orders":    _call2(api2.orderBook, []),
+            "holdings":  _call2(api2.holding,   []),
+            "positions": _call2(api2.position,  []),
+        }
+
+    return {
+        "login":     {"status": True, "error": None, "from_cache": from_cache},
+        "profile":   {"status": True, "data": profile, "error": None},
+        **data_results,
     }
 
 
