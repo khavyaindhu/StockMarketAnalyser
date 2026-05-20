@@ -870,42 +870,26 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
     st.markdown("### 🔴 Live Paper Monitor")
     st.caption("Checks all 20 stocks every 60 seconds during market hours (9:15–3:30 IST) and logs paper BUY/SELL decisions automatically.")
 
-    mon_col1, mon_col2, mon_col3 = st.columns([1, 1, 3])
+    mon_col1, mon_col2 = st.columns([1, 4])
     with mon_col1:
         mon_budget = st.number_input("Daily budget ₹", min_value=10000,
                                      max_value=500000, value=120000, step=10000,
                                      key="mon_budget")
     with mon_col2:
         st.markdown("<br>", unsafe_allow_html=True)
-        start_mon = st.button("▶ Start Monitor", key="mon_start",
-                              disabled=_mon.is_running())
-        stop_mon  = st.button("⏹ Stop Monitor",  key="mon_stop",
-                              disabled=not _mon.is_running())
-    with mon_col3:
-        st.markdown("<br>", unsafe_allow_html=True)
         if _mon.is_running():
             st.success(f"🟢 **Running** — cycle #{_mon.MonitorState.cycle_count}  "
                        f"| Last check: {_mon.MonitorState.last_run_time or '—'}  "
                        f"| Next in ~60s")
         else:
-            st.info("⚫ Monitor stopped — click **▶ Start Monitor** to begin.")
+            st.warning("⏳ Monitor starting…")
 
-    if start_mon:
+    # Auto-start: launch the monitor as soon as the app loads (if not already running)
+    if not _mon.is_running():
         api_obj = _get_live_api()
         if api_obj:
-            ok = _mon.start_monitor(api_obj, excel_path="stock_config.xlsx",
-                                    total_budget=float(mon_budget))
-            if ok:
-                st.success("Monitor started — checking prices every 60 seconds. "
-                           "Keep this browser tab open.")
-                st.rerun()
-            else:
-                st.warning("Monitor is already running.")
-
-    if stop_mon:
-        _mon.stop_monitor()
-        st.info("Monitor stopped.")
-        st.rerun()
+            _mon.start_monitor(api_obj, excel_path="stock_config.xlsx",
+                               total_budget=float(mon_budget))
 
     # Live decision feed
     if _mon.MonitorState.recent_decisions:
