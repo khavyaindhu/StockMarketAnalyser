@@ -999,3 +999,105 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
             )
         with st.expander("Show HOLD rows too"):
             st.dataframe(log_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Phase 5 preview: Live WebSocket Stream ─────────────────────────────────
+    st.markdown("### 📡 Live Price Stream (WebSocket)")
+    st.caption("Real-time LTP for all 20 stocks via Angel One SmartAPI Streaming 2.0")
+
+    from trading import websocket_stream as _ws
+    from trading.stock_master import STOCK_LIST, lookup_tokens
+
+    col_ws1, col_ws2, col_ws3 = st.columns([1, 1, 3])
+
+    with col_ws1:
+        start_ws = st.button(
+            "▶ Start Stream",
+            key="ws_start",
+            disabled=_ws.is_running(),
+            help="Connect to Angel One WebSocket and start receiving live prices",
+        )
+    with col_ws2:
+        stop_ws = st.button(
+            "⏹ Stop Stream",
+            key="ws_stop",
+            disabled=not _ws.is_running(),
+            help="Disconnect the WebSocket stream",
+        )
+    with col_ws3:
+        stream_status = "🟢 Connected" if _ws.is_running() else "⚫ Disconnected"
+        ticks = len(_ws.ltp_cache)
+        st.caption(f"Status: **{stream_status}** &nbsp;·&nbsp; Symbols with live tick: **{ticks} / {len(STOCK_LIST)}**")
+
+    if start_ws:
+        with st.spinner("Connecting to Angel One WebSocket…"):
+            from api.angelone import _load_token
+            import os as _os
+
+            token_data = _load_token()
+            if not token_data:
+                st.error("No cached Angel One token. Go to the **Angel One** tab and click **Fetch from Angel One** first.")
+            else:
+                jwt_token   = token_data.get("access_token", "")
+                feed_token  = token_data.get("feed_token", "")
+                api_key     = _os.getenv("ANGELONE_API_KEY", "")
+                client_code = _os.getenv("ANGELONE_CLIENT_CODE", "")
+
+                api_obj_ws = _get_live_api()
+                if api_obj_ws:
+                    with st.spinner("Looking up token IDs for 20 stocks…"):
+                        token_map = lookup_tokens(api_obj_ws)
+
+                    missing = [s["symbol"] for s in STOCK_LIST if not token_map.get(s["symbol"], {}).get("token")]
+                    if missing:
+                        st.warning(f"Token IDs missing for: {', '.join(missing)}. They will be skipped.")
+
+                    ok = _ws.start_stream(jwt_token, api_key, client_code, feed_token, token_map)
+                    if ok:
+                        st.success("Stream started — prices will update in the table below. Click **Refresh** to see latest values.")
+                    else:
+                        st.error("Could not start stream. Check logs for details.")
+
+    if stop_ws:
+        _ws.stop_stream()
+        st.info("Stream disconnected.")
+
+    # ── Live price table ───────────────────────────────────────────────────────
+    col_ref, _ = st.columns([1, 4])
+    with col_ref:
+        refresh_ws = st.button("🔄 Refresh prices", key="ws_refresh")
+
+    # Build display table: all 20 stocks, fill in streamed LTP where available
+    all_live = _ws.get_all_ltp()
+    ws_rows = []
+    for stock in STOCK_LIST:
+        sym  = stock["symbol"]
+        live = all_live.get(sym)
+        entry = _ws.ltp_cache.get(sym)
+        try:
+            from datetime import datetime as _dt
+            ts = entry["ts"] if entry else None
+            updated = _dt.fromtimestamp(ts / 1000).strftime("%H:%M:%S") if ts else "—"
+        except Exception:
+            updated = "—"
+        ws_rows.append({
+            "Stock":        stock["name"],
+            "Symbol":       sym,
+            "Category":     stock["category"],
+            "Live LTP ₹":  round(live, 2) if live is not None else None,
+            "Last Tick":    updated,
+        })
+
+    ws_df = pd.DataFrame(ws_rows)
+
+    def _ws_ltp_color(val):
+        if val is None or str(val) == "None":
+            return "color: #6b7280"
+        return "color: #22c55e; font-weight: bold"
+
+    ws_styled = ws_df.style.map(_ws_ltp_color, subset=["Live LTP ₹"])
+    st.dataframe(ws_styled, use_container_width=True, hide_index=True)
+
+    if not _ws.is_running() and not all_live:
+        st.info("Click **▶ Start Stream** to begin receiving live prices.")
