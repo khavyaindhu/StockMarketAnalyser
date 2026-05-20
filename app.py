@@ -482,6 +482,10 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                 present = {k: v for k, v in TRADE_COLS.items() if k in df.columns}
                 df = df[list(present.keys())].rename(columns=present)
 
+                for col in ["Qty", "Price ₹", "Value ₹"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+
                 def _color_side(val):
                     if str(val).upper() == "BUY":  return "color: #22c55e"
                     if str(val).upper() == "SELL": return "color: #ef4444"
@@ -490,9 +494,104 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                 styled = df.style
                 if "Side" in df.columns:
                     styled = styled.map(_color_side, subset=["Side"])
+                num_fmt = {c: "{:.2f}" for c in ["Price ₹", "Value ₹"] if c in df.columns}
+                if num_fmt:
+                    styled = styled.format(num_fmt)
 
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption(f"{len(df)} trade(s) executed today")
+
+                # ── P&L breakdown for SELL trades ─────────────────────────────
+                sell_trades = df[df["Side"].str.upper() == "SELL"] if "Side" in df.columns else pd.DataFrame()
+                if not sell_trades.empty:
+                    st.markdown("---")
+                    st.markdown("#### 💰 Today's Realised P&L (SELL trades)")
+                    st.caption("Avg buy price from stock_config.xlsx → My Holdings. Edit that sheet to correct any values.")
+
+                    # Load avg buy prices from Excel
+                    avg_buy_map = {}
+                    try:
+                        import openpyxl as _opxl
+                        _wb = _opxl.load_workbook("stock_config.xlsx", read_only=True, data_only=True)
+                        if "My Holdings" in _wb.sheetnames:
+                            _ws = _wb["My Holdings"]
+                            _hdr = {str(_ws.cell(1, c).value or "").strip().lower(): c
+                                    for c in range(1, _ws.max_column + 1)}
+                            _sym_c = next((v for k, v in _hdr.items() if "symbol" in k), None)
+                            _avg_c = next((v for k, v in _hdr.items() if "avg" in k or "buy price" in k), None)
+                            if _sym_c and _avg_c:
+                                for _r in range(2, _ws.max_row + 1):
+                                    _s = str(_ws.cell(_r, _sym_c).value or "").strip().upper()
+                                    _a = _ws.cell(_r, _avg_c).value
+                                    try:
+                                        if _s and _a:
+                                            avg_buy_map[_s] = float(_a)
+                                    except (ValueError, TypeError):
+                                        pass
+                        _wb.close()
+                    except Exception as _e:
+                        st.warning(f"Could not read stock_config.xlsx: {_e}")
+
+                    pnl_rows = []
+                    for _, tr in sell_trades.iterrows():
+                        raw_sym = str(tr.get("Symbol", "")).upper().replace("-EQ", "").strip()
+                        qty     = tr.get("Qty")
+                        sell_px = tr.get("Price ₹")
+                        sell_val = tr.get("Value ₹")
+
+                        avg_buy = avg_buy_map.get(raw_sym)
+                        if avg_buy and qty and sell_px:
+                            buy_val  = round(float(qty) * avg_buy, 2)
+                            pnl      = round(float(sell_val or (qty * sell_px)) - buy_val, 2)
+                            pnl_pct  = round(pnl / buy_val * 100, 2) if buy_val else None
+                        else:
+                            buy_val = pnl = pnl_pct = None
+
+                        pnl_rows.append({
+                            "Stock (Symbol)":  raw_sym,
+                            "Qty Sold":        qty,
+                            "Sell Price ₹":    sell_px,
+                            "Sell Value ₹":    sell_val,
+                            "Avg Buy Price ₹": avg_buy,
+                            "Buy Cost ₹":      buy_val,
+                            "Profit / Loss ₹": pnl,
+                            "Return %":        pnl_pct,
+                        })
+
+                    pnl_df = pd.DataFrame(pnl_rows)
+
+                    def _pnl_color(val):
+                        try:
+                            return "color: #22c55e; font-weight: bold" if float(val) >= 0 else "color: #ef4444; font-weight: bold"
+                        except Exception:
+                            return ""
+
+                    pnl_styled = pnl_df.style.format({
+                        "Sell Price ₹":    "{:.2f}",
+                        "Sell Value ₹":    "{:,.2f}",
+                        "Avg Buy Price ₹": lambda x: f"{x:.2f}" if pd.notna(x) else "—",
+                        "Buy Cost ₹":      lambda x: f"{x:,.2f}" if pd.notna(x) else "—",
+                        "Profit / Loss ₹": lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—",
+                        "Return %":        lambda x: f"{x:+.2f}%" if pd.notna(x) else "—",
+                    }, na_rep="—")
+                    if "Profit / Loss ₹" in pnl_df.columns:
+                        pnl_styled = pnl_styled.map(_pnl_color, subset=["Profit / Loss ₹"])
+                    if "Return %" in pnl_df.columns:
+                        pnl_styled = pnl_styled.map(_pnl_color, subset=["Return %"])
+
+                    st.dataframe(pnl_styled, use_container_width=True, hide_index=True)
+
+                    # Summary metric
+                    total_pnl = pnl_df["Profit / Loss ₹"].sum() if pnl_df["Profit / Loss ₹"].notna().any() else None
+                    total_sold = pnl_df["Sell Value ₹"].sum() if "Sell Value ₹" in pnl_df.columns else None
+                    mc1, mc2 = st.columns(2)
+                    if total_sold:
+                        mc1.metric("Total Sell Value ₹", f"{total_sold:,.2f}")
+                    if total_pnl is not None:
+                        mc2.metric("Total Realised P&L ₹", f"{total_pnl:,.2f}", delta=f"{total_pnl:+.2f}")
+
+                    if not avg_buy_map:
+                        st.info("No avg buy prices found in stock_config.xlsx. Go to **Trading Bot → Sync Holdings** to populate them, or enter them manually in the Excel sheet.")
 
     # ── AO Sub-tab 3: Order Book ───────────────────────────────────────────────
     with ao3:
