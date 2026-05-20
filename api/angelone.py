@@ -270,5 +270,53 @@ def fetch_all() -> dict:
     }
 
 
+def get_api():
+    """
+    Return a SmartConnect object with a guaranteed-valid token.
+
+    Uses the cached token if it is still fresh; otherwise does a full
+    generateSession() login and saves the new token.  Raises RuntimeError
+    if login fails so callers can handle it cleanly.
+
+    Use this in background threads (e.g. the live monitor) instead of
+    holding on to an api object from startup — tokens expire intraday.
+    """
+    SmartConnect = _import_smart_connect()
+
+    cached = _load_token()
+    if cached:
+        return SmartConnect(
+            api_key=_API_KEY,
+            access_token=cached["access_token"],
+            refresh_token=cached.get("refresh_token"),
+            feed_token=cached.get("feed_token"),
+        )
+
+    # No valid cache — do a fresh login
+    missing = _check_config()
+    if missing:
+        raise RuntimeError(f"Angel One credentials not configured: {', '.join(missing)}")
+
+    _validate_totp_secret(_TOTP_SECRET)
+    totp = pyotp.TOTP(_TOTP_SECRET).now()
+    api  = SmartConnect(api_key=_API_KEY)
+    data = api.generateSession(_CLIENT_CODE, _PASSWORD, totp)
+
+    if not data:
+        raise RuntimeError("Angel One generateSession returned empty response.")
+
+    status = data.get("status")
+    if status is False or str(status).lower() == "false":
+        msg  = data.get("message") or data.get("errorMessage") or "unknown"
+        code = data.get("errorCode") or ""
+        raise RuntimeError(f"Angel One login failed [{code}]: {msg}")
+
+    inner = data.get("data") or {}
+    _save_token(inner.get("jwtToken"), inner.get("refreshToken"),
+                inner.get("feedToken"), inner)
+    log.info("Angel One: fresh login successful, token cached.")
+    return api
+
+
 def is_configured() -> bool:
     return len(_check_config()) == 0

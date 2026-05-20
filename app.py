@@ -884,12 +884,11 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
         else:
             st.warning("⏳ Monitor starting…")
 
-    # Auto-start: launch the monitor as soon as the app loads (if not already running)
+    # Auto-start: launch the monitor as soon as the app loads (if not already running).
+    # No api object needed — monitor fetches a fresh token each cycle automatically.
     if not _mon.is_running():
-        api_obj = _get_live_api()
-        if api_obj:
-            _mon.start_monitor(api_obj, excel_path="stock_config.xlsx",
-                               total_budget=float(mon_budget))
+        _mon.start_monitor(excel_path="stock_config.xlsx",
+                           total_budget=float(mon_budget))
 
     # Live decision feed
     if _mon.MonitorState.recent_decisions:

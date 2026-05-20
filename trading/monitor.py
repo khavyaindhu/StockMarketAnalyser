@@ -65,16 +65,28 @@ def _is_market_open() -> bool:
 
 # ── One 60-second cycle ────────────────────────────────────────────────────────
 
-def _run_cycle(api, excel_path: str, total_budget: float) -> str:
+def _run_cycle(excel_path: str, total_budget: float) -> str:
     """
     Execute one full signal + log cycle using the Phase 1→2→3→4 pipeline.
     Returns the run_id string.
+
+    Fetches a fresh API object each call so an expired intraday token is
+    never reused — get_api() uses the cache when still valid (< 6 h) and
+    re-logs in automatically when it has expired.
     """
     from .phase4 import run_once, _ensure_log
     from . import websocket_stream as _ws
+    from api.angelone import get_api, _clear_token
 
     now    = _ist_now()
     run_id = now.strftime("%Y%m%d_%H%M%S")   # second-level ID for 60s cadence
+
+    # Get a valid api object (cached token or fresh login)
+    try:
+        api = get_api()
+    except Exception as e:
+        log.error(f"Token refresh failed: {e}")
+        raise
 
     # If WebSocket is streaming we already have live LTPs; pass them to
     # fetch_signals via a thin wrapper so Phase 1 skips the API poll
@@ -85,8 +97,16 @@ def _run_cycle(api, excel_path: str, total_budget: float) -> str:
         # WebSocket has enough prices → build signals directly from cache
         result = _run_cycle_from_ws(api, excel_path, total_budget, ws_prices, run_id, now)
     else:
-        # Fall back to full Phase 4 run_once() which calls ltpData() per stock
+        # Fall back to full Phase 4 run_once() which calls ltpData() per stock.
+        # If it returns all-empty (token was still stale), clear cache so next
+        # cycle forces a fresh login.
         result = run_once(api, excel_path=excel_path, total_budget=total_budget)
+        raw = result.get("_raw_log_rows") or []
+        # Detect silent token failure: all 20 stocks logged with empty price
+        prices = [r.get("signal_price") for r in raw if r.get("action") == "HOLD"]
+        if raw and all(p == "" or p is None for p in prices):
+            log.warning("All LTP prices empty — token may have expired. Clearing cache.")
+            _clear_token()
 
     # Extract actionable rows for UI display
     log_rows = result.get("_raw_log_rows", [])
@@ -211,7 +231,7 @@ def _run_cycle_from_ws(api, excel_path, total_budget, ws_prices, run_id, now):
 
 # ── Background thread loop ──────────────────────────────────────────────────────
 
-def _monitor_loop(api, excel_path: str, total_budget: float):
+def _monitor_loop(excel_path: str, total_budget: float):
     MonitorState.running     = True
     MonitorState.cycle_count = 0
     log.info("Live monitor started — checking every 60s during market hours.")
@@ -222,7 +242,7 @@ def _monitor_loop(api, excel_path: str, total_budget: float):
 
         if _is_market_open():
             try:
-                run_id = _run_cycle(api, excel_path, total_budget)
+                run_id = _run_cycle(excel_path, total_budget)
                 MonitorState.last_run_time = now.strftime("%H:%M:%S")
                 MonitorState.last_run_id   = run_id
                 MonitorState.cycle_count  += 1
@@ -247,8 +267,12 @@ def _monitor_loop(api, excel_path: str, total_budget: float):
 
 # ── Public API ──────────────────────────────────────────────────────────────────
 
-def start_monitor(api, excel_path: str = "stock_config.xlsx",
+def start_monitor(excel_path: str = "stock_config.xlsx",
                   total_budget: float = 120_000) -> bool:
+    """
+    Start the background monitor.  No api object needed — each cycle fetches
+    a fresh token automatically via get_api(), so the monitor never goes stale.
+    """
     global _thread
     if is_running():
         return False
@@ -257,7 +281,7 @@ def start_monitor(api, excel_path: str = "stock_config.xlsx",
     MonitorState.errors           = []
     _thread = threading.Thread(
         target=_monitor_loop,
-        args=(api, excel_path, total_budget),
+        args=(excel_path, total_budget),
         daemon=True,
         name="live_monitor",
     )
