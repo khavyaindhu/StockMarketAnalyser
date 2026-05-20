@@ -601,28 +601,34 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                             except (ValueError, TypeError):
                                 pass
 
+                    def _num(v):
+                        """Return float if v is a usable number, else None."""
+                        try:
+                            f = float(v)
+                            return f if f > 0 else None
+                        except (TypeError, ValueError):
+                            return None
+
                     pnl_rows = []
                     for _, tr in sell_trades.iterrows():
                         raw_sym  = str(tr.get("Symbol", "")).upper().replace("-EQ", "").strip()
-                        sell_val = tr.get("Value ₹")
+                        sell_val = _num(tr.get("Value ₹"))
+                        qty      = _num(tr.get("Qty"))
+                        sell_px  = _num(tr.get("Price ₹"))
 
-                        # Prefer Trade Book qty/price; fall back to Order Book
-                        qty     = tr.get("Qty")
-                        sell_px = tr.get("Price ₹")
-                        if (pd.isna(qty) if qty is not None else True) or (pd.isna(sell_px) if sell_px is not None else True):
+                        # Fall back to Order Book when Trade Book is missing qty/price
+                        if qty is None or sell_px is None:
                             ob = ob_lookup.get(raw_sym, {})
-                            qty     = ob.get("qty") or qty
-                            sell_px = ob.get("px")  or sell_px
+                            if qty is None:     qty     = _num(ob.get("qty"))
+                            if sell_px is None: sell_px = _num(ob.get("px"))
 
-                        # If sell_val is missing, derive from qty × price
-                        if (pd.isna(sell_val) if sell_val is not None else True) and qty and sell_px:
-                            sell_val = round(float(qty) * float(sell_px), 2)
+                        # Derive sell_val from qty × price if still missing
+                        if sell_val is None and qty and sell_px:
+                            sell_val = round(qty * sell_px, 2)
 
                         avg_buy = avg_buy_map.get(raw_sym)
                         if avg_buy and qty and sell_px:
-                            qty      = float(qty)
-                            sell_px  = float(sell_px)
-                            sell_val = float(sell_val) if sell_val is not None else round(qty * sell_px, 2)
+                            sell_val = sell_val or round(qty * sell_px, 2)
                             buy_val  = round(qty * avg_buy, 2)
                             pnl      = round(sell_val - buy_val, 2)
                             pnl_pct  = round(pnl / buy_val * 100, 2) if buy_val else None
