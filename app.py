@@ -484,20 +484,39 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
             if not data:
                 st.info("No executed trades today.")
             else:
-                TRADE_COLS = {
-                    "tradingsymbol":  "Symbol",
-                    "exchange":       "Exchange",
-                    "transactiontype":"Side",
-                    "producttype":    "Product",
-                    "quantity":       "Qty",
-                    "price":          "Price ₹",
-                    "tradevalue":     "Value ₹",
-                    "tradetime":      "Trade Time",
-                    "orderid":        "Order ID",
+                raw_df = pd.DataFrame(data)
+
+                # Angel One uses "quantity" or "qty" depending on API version
+                def _pick(df, *candidates):
+                    for c in candidates:
+                        if c in df.columns:
+                            return c
+                    return None
+
+                qty_col  = _pick(raw_df, "quantity", "qty", "Quantity")
+                px_col   = _pick(raw_df, "price", "Price", "tradeprice")
+                val_col  = _pick(raw_df, "tradevalue", "tradeValue", "value")
+                side_col = _pick(raw_df, "transactiontype", "side", "Side")
+                sym_col  = _pick(raw_df, "tradingsymbol", "symbol")
+
+                TRADE_COLS = {}
+                if sym_col:  TRADE_COLS[sym_col]  = "Symbol"
+                col_map = {
+                    _pick(raw_df, "exchange"):      "Exchange",
+                    side_col:                       "Side",
+                    _pick(raw_df, "producttype"):   "Product",
+                    qty_col:                        "Qty",
+                    px_col:                         "Price ₹",
+                    val_col:                        "Value ₹",
+                    _pick(raw_df, "tradetime", "tradeTime"): "Trade Time",
+                    _pick(raw_df, "orderid", "orderId"):     "Order ID",
                 }
-                df = pd.DataFrame(data)
-                present = {k: v for k, v in TRADE_COLS.items() if k in df.columns}
-                df = df[list(present.keys())].rename(columns=present)
+                for k, v in col_map.items():
+                    if k:
+                        TRADE_COLS[k] = v
+
+                present_cols = [k for k in TRADE_COLS if k in raw_df.columns]
+                df = raw_df[present_cols].rename(columns=TRADE_COLS)
 
                 for col in ["Qty", "Price ₹", "Value ₹"]:
                     if col in df.columns:
@@ -518,15 +537,31 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption(f"{len(df)} trade(s) executed today")
 
+                with st.expander("Raw field names (debug — check if Qty/Price missing)"):
+                    st.write(list(raw_df.columns))
+
                 # ── P&L breakdown for SELL trades ─────────────────────────────
                 sell_trades = df[df["Side"].str.upper() == "SELL"] if "Side" in df.columns else pd.DataFrame()
                 if not sell_trades.empty:
                     st.markdown("---")
                     st.markdown("#### 💰 Today's Realised P&L (SELL trades)")
-                    st.caption("Avg buy price from stock_config.xlsx → My Holdings. Edit that sheet to correct any values.")
+                    st.caption("Avg buy price sourced from your Angel One holdings (preferred) or stock_config.xlsx.")
 
-                    # Load avg buy prices from Excel
+                    # ── Build avg buy price map: prefer live holdings from session state ──
                     avg_buy_map = {}
+
+                    # Source 1: Holdings already fetched in this session
+                    holdings_data = (st.session_state.get("ao_holdings") or {}).get("data") or []
+                    for h in holdings_data:
+                        raw_sym = str(h.get("tradingsymbol") or "").upper().replace("-EQ", "").strip()
+                        try:
+                            avg = float(h.get("averageprice") or 0)
+                            if avg > 0:
+                                avg_buy_map[raw_sym] = avg
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Source 2: Excel fallback for any still missing
                     try:
                         import openpyxl as _opxl
                         _wb = _opxl.load_workbook("stock_config.xlsx", read_only=True, data_only=True)
@@ -541,19 +576,19 @@ ANGELONE_TOTP_SECRET=your_totp_secret   # base32 secret from Angel One TOTP setu
                                     _s = str(_ws.cell(_r, _sym_c).value or "").strip().upper()
                                     _a = _ws.cell(_r, _avg_c).value
                                     try:
-                                        if _s and _a:
+                                        if _s and _a and _s not in avg_buy_map:
                                             avg_buy_map[_s] = float(_a)
                                     except (ValueError, TypeError):
                                         pass
                         _wb.close()
-                    except Exception as _e:
-                        st.warning(f"Could not read stock_config.xlsx: {_e}")
+                    except Exception:
+                        pass
 
                     pnl_rows = []
                     for _, tr in sell_trades.iterrows():
-                        raw_sym = str(tr.get("Symbol", "")).upper().replace("-EQ", "").strip()
-                        qty     = tr.get("Qty")
-                        sell_px = tr.get("Price ₹")
+                        raw_sym  = str(tr.get("Symbol", "")).upper().replace("-EQ", "").strip()
+                        qty      = tr.get("Qty")
+                        sell_px  = tr.get("Price ₹")
                         sell_val = tr.get("Value ₹")
 
                         avg_buy = avg_buy_map.get(raw_sym)
