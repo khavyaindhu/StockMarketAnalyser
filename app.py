@@ -1290,3 +1290,182 @@ Then open the **My Holdings** sheet and fill in your **Qty** and **Avg Buy Price
 
     if not _ws.is_running() and not all_live:
         st.info("Click **▶ Start Stream** to begin receiving live prices.")
+
+    st.divider()
+
+    # ── Phase 5: Paper Portfolio Tracker ───────────────────────────────────────
+    st.markdown("### 🗂 Phase 5 — Paper Portfolio Tracker")
+    st.caption("Simulates a virtual ₹1.5L portfolio built from your paper trade log — tracks open positions and realised P&L.")
+
+    from trading.phase5 import build_portfolio as _build_portfolio
+
+    p5_budget = st.number_input(
+        "Starting virtual cash ₹",
+        min_value=10000, max_value=1000000, value=150000, step=10000,
+        key="p5_budget",
+    )
+
+    # Use streamed LTPs if available, else fall back to Phase 1 signals
+    p5_ltp = dict(_ws.get_all_ltp()) if _ws.get_all_ltp() else {}
+    if not p5_ltp and "p1_result" in st.session_state:
+        for _, row in st.session_state["p1_result"]["signals"].iterrows():
+            if pd.notna(row.get("LTP ₹")):
+                p5_ltp[row["Symbol"]] = row["LTP ₹"]
+
+    portfolio = _build_portfolio(starting_cash=float(p5_budget), ltp_map=p5_ltp or None)
+
+    if portfolio["log_df"].empty:
+        st.info("No paper trade log yet. Run Phase 4 cycles to populate it.")
+    else:
+        # Summary metrics
+        total_gain = portfolio["realised_pnl"] + portfolio["unrealised_pnl"]
+        pm1, pm2, pm3, pm4, pm5 = st.columns(5)
+        pm1.metric("Portfolio Value ₹",   f"{portfolio['portfolio_value']:,.0f}")
+        pm2.metric("Available Cash ₹",    f"{portfolio['cash']:,.0f}")
+        pm3.metric("Realised P&L ₹",      f"{portfolio['realised_pnl']:+,.0f}",
+                   delta=f"{portfolio['realised_pnl']:+.0f}")
+        pm4.metric("Unrealised P&L ₹",    f"{portfolio['unrealised_pnl']:+,.0f}"
+                                           if p5_ltp else "— (no LTP)",
+                   delta=f"{portfolio['unrealised_pnl']:+.0f}" if p5_ltp else None)
+        pm5.metric("Win / Loss",
+                   f"{portfolio['win_count']}W / {portfolio['loss_count']}L")
+
+        st.markdown("#### Open Paper Positions")
+        open_df = portfolio["open_positions"]
+        if open_df.empty:
+            st.info("No open paper positions.")
+        else:
+            def _unreal_color(val):
+                try:
+                    return "color:#22c55e" if float(val) >= 0 else "color:#ef4444"
+                except Exception:
+                    return "color:#6b7280"
+
+            open_styled = open_df.style.format({
+                "Entry Price ₹":    "{:.2f}",
+                "LTP ₹":            lambda x: f"{x:.2f}" if pd.notna(x) else "—",
+                "Current Value ₹":  lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—",
+                "Unrealised P&L ₹": lambda x: f"₹{x:+,.2f}" if pd.notna(x) else "—",
+                "Return %":         lambda x: f"{x:+.2f}%" if pd.notna(x) else "—",
+            }, na_rep="—")
+            if "Unrealised P&L ₹" in open_df.columns:
+                open_styled = open_styled.map(_unreal_color, subset=["Unrealised P&L ₹"])
+            st.dataframe(open_styled, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Closed Paper Trades")
+        closed_df = portfolio["closed_trades"]
+        if closed_df.empty:
+            st.info("No closed paper trades yet.")
+        else:
+            closed_styled = closed_df.style.format({
+                "Entry Price ₹":    "{:.2f}",
+                "Exit Price ₹":     "{:.2f}",
+                "Realised P&L ₹":  "₹{:+,.2f}",
+                "Return %":         "{:+.2f}%",
+            })
+            closed_styled = closed_styled.map(_pnl_color, subset=["Realised P&L ₹"])
+            st.dataframe(closed_styled, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Phase 6: Strategy Performance Analytics ────────────────────────────────
+    st.markdown("### 📊 Phase 6 — Strategy Performance Analytics")
+    st.caption("Win rate, category edge, P&L curve — validates the algorithm before going live.")
+
+    from trading.phase6 import (
+        signal_summary as _sig_summary,
+        closed_trade_stats as _trade_stats,
+        category_breakdown as _cat_breakdown,
+        daily_pnl_curve as _pnl_curve,
+        top_signals as _top_signals,
+        signal_accuracy as _sig_accuracy,
+    )
+
+    if portfolio["log_df"].empty:
+        st.info("No data yet — run Phase 4 paper trading cycles first.")
+    else:
+        log_df_p6 = portfolio["log_df"]
+        closed_p6 = portfolio["closed_trades"]
+
+        # ── Signal summary ─────────────────────────────────────────────────────
+        sig = _sig_summary(log_df_p6)
+        if sig:
+            sa1, sa2, sa3, sa4, sa5 = st.columns(5)
+            sa1.metric("Total Runs",      sig.get("total_runs", 0))
+            sa2.metric("BUY Signals",     sig.get("buy_signals", 0))
+            sa3.metric("SELL Signals",    sig.get("sell_signals", 0))
+            sa4.metric("Total Deployed ₹", f"{sig.get('total_deployed', 0):,.0f}")
+            sa5.metric("Date Range",      sig.get("date_range", "—"))
+
+        st.markdown("#### Trade Performance")
+        if not closed_p6.empty:
+            stats = _trade_stats(closed_p6)
+            tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+            tc1.metric("Closed Trades",  stats.get("total_trades", 0))
+            tc2.metric("Win Rate",       f"{stats.get('win_rate_pct', 0):.1f}%")
+            tc3.metric("Avg Return",     f"{stats.get('avg_return_pct', 0):+.2f}%")
+            tc4.metric("Total Realised ₹", f"{stats.get('total_realised', 0):+,.0f}")
+            tc5.metric("Profit Factor",  stats.get("profit_factor", "—"))
+
+            # Best / worst trades
+            bc1, bc2 = st.columns(2)
+            best  = stats.get("best_trade", {})
+            worst = stats.get("worst_trade", {})
+            with bc1:
+                if best:
+                    st.success(f"**Best trade:** {best.get('Stock','—')} — "
+                               f"₹{best.get('Realised P&L ₹',0):+,.0f} "
+                               f"({best.get('Return %',0):+.2f}%)")
+            with bc2:
+                if worst:
+                    st.error(f"**Worst trade:** {worst.get('Stock','—')} — "
+                             f"₹{worst.get('Realised P&L ₹',0):+,.0f} "
+                             f"({worst.get('Return %',0):+.2f}%)")
+
+            # Top / bottom signals
+            top5, bot5 = _top_signals(closed_p6)
+            t1, t2 = st.columns(2)
+            with t1:
+                st.markdown("**Top 5 trades**")
+                st.dataframe(top5[["Stock", "Return %", "Realised P&L ₹"]].style.format(
+                    {"Return %": "{:+.2f}%", "Realised P&L ₹": "₹{:+,.2f}"}
+                ), use_container_width=True, hide_index=True)
+            with t2:
+                st.markdown("**Bottom 5 trades**")
+                st.dataframe(bot5[["Stock", "Return %", "Realised P&L ₹"]].style.format(
+                    {"Return %": "{:+.2f}%", "Realised P&L ₹": "₹{:+,.2f}"}
+                ), use_container_width=True, hide_index=True)
+        else:
+            st.info("No closed paper trades yet to analyse.")
+
+        # ── Category breakdown ─────────────────────────────────────────────────
+        st.markdown("#### Category / Sector Edge")
+        cat_df = _cat_breakdown(log_df_p6, closed_p6 if not closed_p6.empty else None)
+        if not cat_df.empty:
+            st.dataframe(cat_df, use_container_width=True, hide_index=True)
+
+        # ── P&L curve ─────────────────────────────────────────────────────────
+        if not closed_p6.empty:
+            pnl_curve = _pnl_curve(closed_p6)
+            if not pnl_curve.empty:
+                st.markdown("#### Cumulative P&L Curve")
+                st.line_chart(
+                    pnl_curve.set_index("Date")[["Cumulative P&L ₹"]],
+                    use_container_width=True,
+                )
+
+        # ── Signal accuracy vs current LTP ────────────────────────────────────
+        if p5_ltp:
+            st.markdown("#### Signal Accuracy (vs current LTP)")
+            acc_df = _sig_accuracy(log_df_p6, p5_ltp)
+            if not acc_df.empty:
+                def _acc_color(val):
+                    return "color:#22c55e" if "Yes" in str(val) else "color:#ef4444"
+                st.dataframe(
+                    acc_df.style.map(_acc_color, subset=["Correct?"]).format({
+                        "Signal Price ₹":       "{:.2f}",
+                        "Current LTP ₹":        "{:.2f}",
+                        "Gain Since Signal %":  "{:+.2f}%",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
