@@ -3,18 +3,20 @@
 One-time (or on-demand) download of NSE daily OHLCV from Angel One SmartAPI.
 
 Default: last 1 calendar year of ONE_DAY candles for all 20 stocks in STOCK_LIST.
-Skips download if manifest + files already exist (use --force to re-download).
+Skips download if manifest + files already exist for the requested period
+(use --force to re-download).
 
 Usage (from project root):
     python scripts/download_historical.py
     python scripts/download_historical.py --force
     python scripts/download_historical.py --years 1
+    python scripts/download_historical.py --years 10
 
 Outputs under data/historical/daily/:
     manifest.json
     per_stock/<SYMBOL>.csv
-    historical_daily_1y_combined.csv
-    historical_daily_1y.xlsx  (Metadata + All_Stocks sheets)
+    historical_daily_combined.csv
+    historical_daily.xlsx  (Metadata + All_Stocks sheets)
 """
 
 from __future__ import annotations
@@ -38,8 +40,8 @@ from trading.stock_master import STOCK_LIST, lookup_tokens
 OUTPUT_DIR = ROOT / "data" / "historical" / "daily"
 PER_STOCK_DIR = OUTPUT_DIR / "per_stock"
 MANIFEST_FILE = OUTPUT_DIR / "manifest.json"
-COMBINED_CSV = OUTPUT_DIR / "historical_daily_1y_combined.csv"
-COMBINED_XLSX = OUTPUT_DIR / "historical_daily_1y.xlsx"
+COMBINED_CSV = OUTPUT_DIR / "historical_daily_combined.csv"
+COMBINED_XLSX = OUTPUT_DIR / "historical_daily.xlsx"
 
 INTERVAL = "ONE_DAY"
 REQUEST_DELAY_SEC = 0.4
@@ -138,7 +140,7 @@ def _fetch_candles_once(api, token: str, fromdate: str, todate: str) -> list:
 
 
 def _fetch_candles(api, token: str, fromdate: str, todate: str) -> list:
-    """Fetch candles; retry in ~6-month chunks if a single-year request fails."""
+    """Fetch candles; retry in ~6-month chunks if one large request fails."""
     try:
         return _fetch_candles_once(api, token, fromdate, todate)
     except RuntimeError:
@@ -168,8 +170,21 @@ def _fetch_candles(api, token: str, fromdate: str, todate: str) -> list:
     return unique
 
 
-def _is_complete(manifest: dict) -> bool:
-    """True if manifest matches current stock list and all per-stock CSVs exist."""
+def _manifest_years(manifest: dict) -> float:
+    try:
+        return float(manifest.get("years_requested", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_complete(manifest: dict, requested_years: float) -> bool:
+    """True if saved files cover this request and the current stock list."""
+    if manifest.get("source") != "angel_one_smartapi":
+        return False
+    if manifest.get("interval") != INTERVAL:
+        return False
+    if _manifest_years(manifest) < requested_years:
+        return False
     expected = {s["symbol"] for s in STOCK_LIST}
     saved = set(manifest.get("symbols") or [])
     if saved != expected:
@@ -197,6 +212,10 @@ def _save_manifest(meta: dict) -> None:
 
 
 def download(years: float = 1.0, force: bool = False) -> int:
+    if years <= 0:
+        print("ERROR: --years must be greater than 0")
+        return 1
+
     if not is_configured():
         print("ERROR: Angel One credentials missing in .env")
         print("  Required: ANGELONE_API_KEY, ANGELONE_CLIENT_CODE,")
@@ -204,9 +223,10 @@ def download(years: float = 1.0, force: bool = False) -> int:
         return 1
 
     manifest = _load_manifest()
-    if manifest and _is_complete(manifest) and not force:
+    if manifest and _is_complete(manifest, float(years)) and not force:
         print("Historical data already downloaded (use --force to re-download).")
         print(f"  Downloaded at: {manifest.get('downloaded_at')}")
+        print(f"  Years in file: {manifest.get('years_requested')}")
         print(f"  Range: {manifest.get('from_date')} → {manifest.get('to_date')}")
         print(f"  Folder: {OUTPUT_DIR}")
         return 0
@@ -257,6 +277,8 @@ def download(years: float = 1.0, force: bool = False) -> int:
 
     combined = pd.concat(all_frames, ignore_index=True)
     combined = combined.sort_values(["NSE Symbol", "Date"]).reset_index(drop=True)
+    combined = combined.drop_duplicates(subset=["NSE Symbol", "Date"], keep="last")
+    combined = combined.reset_index(drop=True)
     combined.to_csv(COMBINED_CSV, index=False)
 
     meta_rows = pd.DataFrame([
@@ -265,6 +287,7 @@ def download(years: float = 1.0, force: bool = False) -> int:
         {"Field": "Interval", "Value": INTERVAL},
         {"Field": "From Date", "Value": from_label},
         {"Field": "To Date", "Value": to_label},
+        {"Field": "Requested Years", "Value": years},
         {"Field": "Stocks Requested", "Value": len(STOCK_LIST)},
         {"Field": "Stocks Downloaded", "Value": len(all_frames)},
         {"Field": "Total Rows", "Value": len(combined)},
