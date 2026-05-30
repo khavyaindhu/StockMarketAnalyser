@@ -10,11 +10,18 @@ import json
 import time
 import logging
 import pyotp
+from pathlib import Path
 from dotenv import load_dotenv
 
 log = logging.getLogger("angelone")
 
-load_dotenv()
+_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = _ROOT / ".env"
+
+_API_KEY = ""
+_CLIENT_CODE = ""
+_PASSWORD = ""
+_TOTP_SECRET = ""
 
 _TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".ao_token.json")
 _TOKEN_TTL  = 6 * 3600   # reuse for up to 6 h (Angel One sessions expire intraday)
@@ -24,13 +31,18 @@ def _ascii(value: str) -> str:
     return "".join(c for c in (value or "").strip() if ord(c) < 128)
 
 
-_API_KEY     = _ascii(os.getenv("ANGELONE_API_KEY", ""))
-_CLIENT_CODE = _ascii(os.getenv("ANGELONE_CLIENT_CODE", ""))
-_PASSWORD    = _ascii(os.getenv("ANGELONE_PASSWORD", ""))
-_TOTP_SECRET = _ascii(os.getenv("ANGELONE_TOTP_SECRET", "")).upper().replace(" ", "")
+def _refresh_config() -> None:
+    """Reload project-root .env so Streamlit reruns see newly saved credentials."""
+    global _API_KEY, _CLIENT_CODE, _PASSWORD, _TOTP_SECRET
+    load_dotenv(dotenv_path=_ENV_FILE, override=True)
+    _API_KEY = _ascii(os.getenv("ANGELONE_API_KEY", ""))
+    _CLIENT_CODE = _ascii(os.getenv("ANGELONE_CLIENT_CODE", ""))
+    _PASSWORD = _ascii(os.getenv("ANGELONE_PASSWORD", ""))
+    _TOTP_SECRET = _ascii(os.getenv("ANGELONE_TOTP_SECRET", "")).upper().replace(" ", "")
 
 
 def _check_config() -> list[str]:
+    _refresh_config()
     missing = []
     if not _API_KEY     or _API_KEY     == "your_api_key_here":     missing.append("ANGELONE_API_KEY")
     if not _CLIENT_CODE or _CLIENT_CODE == "your_client_code_here": missing.append("ANGELONE_CLIENT_CODE")
@@ -120,6 +132,7 @@ def fetch_all() -> dict:
             "positions": {"status": False, "data": [],  "error": msg},
         }
 
+    _refresh_config()
     SmartConnect = _import_smart_connect()
 
     # ── Try cached token (skip login) ──────────────────────────────────────────
@@ -281,6 +294,7 @@ def get_api():
     Use this in background threads (e.g. the live monitor) instead of
     holding on to an api object from startup — tokens expire intraday.
     """
+    _refresh_config()
     SmartConnect = _import_smart_connect()
 
     cached = _load_token()
