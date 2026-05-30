@@ -7,8 +7,10 @@ so subsequent runs don't need an extra API call.
 
 import os
 import json
+import time
 
 _CACHE_FILE = os.path.join(os.path.dirname(__file__), ".token_cache.json")
+_SEARCH_DELAY_SEC = 1.1
 
 # ── 20-stock master list ───────────────────────────────────────────────────────
 # Fields: name, symbol (NSE base), category, buy_dip_pct, sell_target_pct, max_capital
@@ -83,7 +85,7 @@ def lookup_tokens(api) -> dict[str, dict]:
     missing = [s for s in STOCK_LIST if not _has_token(cache, s["symbol"])]
 
     if missing:
-        for stock in missing:
+        for index, stock in enumerate(missing):
             sym = stock["symbol"]
             try:
                 result = api.searchScrip("NSE", sym)
@@ -110,6 +112,9 @@ def lookup_tokens(api) -> dict[str, dict]:
                 if _is_token_error(str(e)):
                     raise
                 cache[sym] = {"trading_symbol": f"{sym}-EQ", "token": None}
+
+            if index < len(missing) - 1:
+                time.sleep(_SEARCH_DELAY_SEC)
 
         _save_cache(cache)
 
