@@ -64,19 +64,34 @@ def _save_cache(cache: dict):
         pass
 
 
+def _has_token(cache: dict, symbol: str) -> bool:
+    item = cache.get(symbol)
+    return isinstance(item, dict) and bool(item.get("token"))
+
+
+def _is_token_error(text: str) -> bool:
+    lowered = str(text).lower()
+    return any(part in lowered for part in ("invalid token", "ag8001", "token expired", "unauthorized"))
+
+
 def lookup_tokens(api) -> dict[str, dict]:
     """
     Return {symbol: {trading_symbol, token}} for all 20 stocks.
     Uses cache; fetches missing tokens via searchScrip.
     """
-    cache   = _load_cache()
-    missing = [s for s in STOCK_LIST if s["symbol"] not in cache]
+    cache = {sym: data for sym, data in _load_cache().items() if _has_token({sym: data}, sym)}
+    missing = [s for s in STOCK_LIST if not _has_token(cache, s["symbol"])]
 
     if missing:
         for stock in missing:
             sym = stock["symbol"]
             try:
                 result = api.searchScrip("NSE", sym)
+                if isinstance(result, dict):
+                    status = result.get("status") if "status" in result else result.get("success")
+                    if status is False or str(status).lower() == "false":
+                        msg = result.get("message") or result.get("errorMessage") or "searchScrip failed"
+                        raise RuntimeError(msg)
                 hits   = (result or {}).get("data") or []
                 # Prefer exact equity match (e.g. CIPLA-EQ)
                 match  = next(
@@ -91,7 +106,9 @@ def lookup_tokens(api) -> dict[str, dict]:
                     }
                 else:
                     cache[sym] = {"trading_symbol": f"{sym}-EQ", "token": None}
-            except Exception:
+            except Exception as e:
+                if _is_token_error(str(e)):
+                    raise
                 cache[sym] = {"trading_symbol": f"{sym}-EQ", "token": None}
 
         _save_cache(cache)

@@ -283,13 +283,13 @@ def fetch_all() -> dict:
     }
 
 
-def get_api():
+def get_api(force_login: bool = False):
     """
     Return a SmartConnect object with a guaranteed-valid token.
 
     Uses the cached token if it is still fresh; otherwise does a full
-    generateSession() login and saves the new token.  Raises RuntimeError
-    if login fails so callers can handle it cleanly.
+    generateSession() login and saves the new token. Pass force_login=True
+    for one-off jobs that should not risk a stale cached token.
 
     Use this in background threads (e.g. the live monitor) instead of
     holding on to an api object from startup — tokens expire intraday.
@@ -297,7 +297,10 @@ def get_api():
     _refresh_config()
     SmartConnect = _import_smart_connect()
 
-    cached = _load_token()
+    if force_login:
+        _clear_token()
+
+    cached = None if force_login else _load_token()
     if cached:
         return SmartConnect(
             api_key=_API_KEY,

@@ -233,7 +233,7 @@ def download(years: float = 1.0, force: bool = False) -> int:
 
     from_api, to_api, from_label, to_label = _market_date_range(years)
     print(f"Connecting to Angel One…")
-    api = get_api()
+    api = get_api(force_login=True)
     print(f"Resolving NSE tokens for {len(STOCK_LIST)} stocks…")
     tokens = lookup_tokens(api)
 
