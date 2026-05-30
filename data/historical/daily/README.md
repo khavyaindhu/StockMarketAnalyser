@@ -27,6 +27,21 @@ Works on **market holidays** and weekends — historical API is not tied to live
 | `historical_daily_combined.csv` | All 20 stocks in one table (best for pandas/analysis) |
 | `historical_daily.xlsx` | Metadata sheet + All_Stocks + one sheet per symbol |
 | `per_stock/<SYMBOL>.csv` | Single-symbol CSV with same column headings |
+| `strategy_recommendations.csv` | Optional output from the historical strategy analyzer |
+| `strategy_backtest_grid.csv` | Optional full parameter grid from the historical strategy analyzer |
+
+## Analyze Strategy
+
+After downloading 10-year data, run:
+
+```bash
+python scripts/analyze_strategy.py --budget 500000
+```
+
+This writes recommended buy-dip and sell-target percentages to
+`strategy_recommendations.csv` and the full tested grid to
+`strategy_backtest_grid.csv`. The Trading Bot tab also has the same analyzer in
+the app UI.
 
 ## Column headings
 

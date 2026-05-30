@@ -829,6 +829,156 @@ with tab6:
     st.subheader("🤖 Trading Bot — Phase 1: Signal Dashboard")
     st.caption("Dip-Buy / Rise-Sell signals for your 20-stock watchlist")
 
+    # Historical backtest runs before live setup checks so it can be used
+    # even when Angel One or stock_config.xlsx is not ready.
+    st.markdown("### Historical Strategy Analyzer")
+    st.caption("Backtests buy-dip and profit-target combinations on the downloaded daily history.")
+
+    from pathlib import Path as _Path
+    hist_csv = _Path("data/historical/daily/historical_daily_combined.csv")
+
+    if not hist_csv.exists():
+        st.warning("Historical CSV not found. Run `python scripts/download_historical.py --years 10 --force` first.")
+    else:
+        from trading.strategy_analyzer import (
+            DEFAULT_BUY_DIPS as _DEFAULT_BUY_DIPS,
+            DEFAULT_SELL_TARGETS as _DEFAULT_SELL_TARGETS,
+            analyze_strategy as _analyze_strategy,
+            load_history as _load_history,
+            portfolio_summary as _portfolio_summary,
+        )
+
+        @st.cache_data(show_spinner=False)
+        def _run_historical_strategy(path, total_budget, buy_dips, sell_targets, stuck_days):
+            history = _load_history(path)
+            recs, grid = _analyze_strategy(
+                history,
+                total_budget=float(total_budget),
+                buy_dips=list(buy_dips),
+                sell_targets=list(sell_targets),
+                stuck_days=int(stuck_days),
+            )
+            return recs, grid
+
+        with st.expander("Tune buy/sell percentages from historical data", expanded=True):
+            h1, h2, h3 = st.columns([1, 1, 2])
+            with h1:
+                hist_budget = st.number_input(
+                    "Analysis budget Rs",
+                    min_value=50_000,
+                    max_value=2_000_000,
+                    value=500_000,
+                    step=50_000,
+                    key="hist_strategy_budget",
+                )
+            with h2:
+                stuck_days = st.number_input(
+                    "Stuck capital after days",
+                    min_value=30,
+                    max_value=730,
+                    value=180,
+                    step=30,
+                    key="hist_stuck_days",
+                )
+            with h3:
+                st.caption("The analyzer assumes one open position per stock. Open positions are penalized, so profit-only selling cannot hide stuck capital.")
+
+            buy_grid = st.multiselect(
+                "Buy dip candidates %",
+                options=_DEFAULT_BUY_DIPS,
+                default=_DEFAULT_BUY_DIPS,
+                key="hist_buy_grid",
+            )
+            sell_grid = st.multiselect(
+                "Sell target candidates %",
+                options=_DEFAULT_SELL_TARGETS,
+                default=_DEFAULT_SELL_TARGETS,
+                key="hist_sell_grid",
+            )
+
+            run_hist = st.button("Run Historical Analysis", type="primary", key="run_hist_strategy")
+            if run_hist or "hist_strategy_recs" in st.session_state:
+                if not buy_grid or not sell_grid:
+                    st.error("Choose at least one buy dip and one sell target candidate.")
+                else:
+                    with st.spinner("Backtesting historical strategy combinations..."):
+                        recs, grid = _run_historical_strategy(
+                            str(hist_csv),
+                            float(hist_budget),
+                            tuple(float(x) for x in buy_grid),
+                            tuple(float(x) for x in sell_grid),
+                            int(stuck_days),
+                        )
+                    st.session_state["hist_strategy_recs"] = recs
+                    st.session_state["hist_strategy_grid"] = grid
+
+            recs = st.session_state.get("hist_strategy_recs")
+            grid = st.session_state.get("hist_strategy_grid")
+
+            if isinstance(recs, pd.DataFrame) and not recs.empty:
+                summary = _portfolio_summary(recs, total_budget=float(hist_budget))
+                sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                sc1.metric("Stocks analyzed", summary.get("stocks", 0))
+                sc2.metric("Avg hit rate", f"{summary.get('avg_hit_rate_pct', 0):.1f}%")
+                sc3.metric("Avg annual return", f"{summary.get('avg_annual_return_pct', 0):+.1f}%")
+                sc4.metric("Stuck positions", summary.get("total_stuck_positions", 0))
+                sc5.metric("Worst drawdown", f"{summary.get('worst_drawdown_pct', 0):.1f}%")
+
+                show_cols = [
+                    "Stock", "Symbol", "Category",
+                    "Current Buy Dip %", "Current Sell Target %",
+                    "Buy Dip %", "Sell Target %",
+                    "Score", "Annual Return %", "Target Hit Rate %",
+                    "Closed Trades", "Avg Holding Days", "Max Holding Days",
+                    "Max Drawdown %", "Stuck Positions", "Suggested Action",
+                ]
+                rec_view = recs[[c for c in show_cols if c in recs.columns]].copy()
+                st.dataframe(
+                    rec_view.style.format({
+                        "Current Buy Dip %": "{:.1f}",
+                        "Current Sell Target %": "{:.1f}",
+                        "Buy Dip %": "{:.1f}",
+                        "Sell Target %": "{:.1f}",
+                        "Score": "{:.2f}",
+                        "Annual Return %": "{:+.2f}",
+                        "Target Hit Rate %": "{:.1f}",
+                        "Avg Holding Days": "{:.1f}",
+                        "Max Holding Days": "{:.0f}",
+                        "Max Drawdown %": "{:.2f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.download_button(
+                    "Download recommendations CSV",
+                    data=recs.to_csv(index=False).encode("utf-8"),
+                    file_name="strategy_recommendations.csv",
+                    mime="text/csv",
+                    key="download_strategy_recs",
+                )
+
+                if isinstance(grid, pd.DataFrame) and not grid.empty:
+                    selected_symbol = st.selectbox(
+                        "Inspect all tested combinations for one stock",
+                        sorted(grid["Symbol"].unique()),
+                        key="hist_symbol_grid",
+                    )
+                    one_stock_grid = grid[grid["Symbol"] == selected_symbol].sort_values("Score", ascending=False)
+                    inspect_cols = [
+                        "Buy Dip %", "Sell Target %", "Score", "Annual Return %",
+                        "Target Hit Rate %", "Closed Trades", "Open Positions",
+                        "Avg Holding Days", "Max Holding Days", "Max Drawdown %",
+                        "Total P&L Rs",
+                    ]
+                    st.dataframe(
+                        one_stock_grid[[c for c in inspect_cols if c in one_stock_grid.columns]].head(25),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+    st.divider()
+
     if not is_configured():
         st.error("Angel One credentials not configured. Fill in `.env` first.")
         st.stop()
